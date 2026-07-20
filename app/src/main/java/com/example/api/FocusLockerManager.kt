@@ -38,6 +38,9 @@ object FocusLockerManager {
     private var roomRef: com.google.firebase.database.DatabaseReference? = null
     
 
+    fun sanitizeEmailForRoom(email: String): String {
+        return email.lowercase().trim().replace(".", "_")
+    }
 
     fun getFallbackDisplayName(email: String): String {
         val clean = email.substringBefore("@").replace(".", "_")
@@ -68,23 +71,30 @@ object FocusLockerManager {
 
             val database = FirebaseDatabase.getInstance(dbUrl)
             val roomId = "ROOM_${System.currentTimeMillis()}"
-            val sanitizedMyEmail = DevicePresenceManager.sanitizeEmail(myEmail)
+            val sanitizedMyEmail = sanitizeEmailForRoom(myEmail)
+            val legacySanitizedMyEmail = DevicePresenceManager.sanitizeEmail(myEmail)
             val trueTime = TimeEngine.getTrueTimeMs()
 
             val roomRef = database.getReference("FOCUS_TIMMER")
                 .child("SHARED_ROOMS")
                 .child(roomId)
 
+            val participantsMap = mutableMapOf<String, Any>()
+            participantsMap[sanitizedMyEmail] = trueTime
+            if (sanitizedMyEmail != legacySanitizedMyEmail) {
+                participantsMap[legacySanitizedMyEmail] = trueTime
+            }
+
             val payload = mapOf(
-                "Host_Email" to myEmail,
+                "Host_Email" to myEmail.lowercase().trim(),
                 "Room_Name" to roomName,
-                "Participants" to mapOf(sanitizedMyEmail to trueTime)
+                "Participants" to participantsMap
             )
 
             roomRef.setValue(payload).addOnCompleteListener { task ->
                 if (task.isSuccessful) {
                     Log.d(TAG, "Successfully created shared room: $roomId")
-                    joinRoom(context, myEmail, roomId)
+                    performActualJoin(context, myEmail, roomId)
                     onSuccess(roomId)
                 } else {
                     onFailure(task.exception ?: Exception("Failed to write room state"))
@@ -104,26 +114,80 @@ object FocusLockerManager {
             if (dbUrl.isEmpty()) return
 
             val database = FirebaseDatabase.getInstance(dbUrl)
-            val sanitizedMyEmail = DevicePresenceManager.sanitizeEmail(myEmail)
+            val roomsRef = database.getReference("FOCUS_TIMMER").child("SHARED_ROOMS")
+
+            // Normalize entered Room ID candidates (handles case variations and numeric-only entries)
+            val trimmedInput = roomId.trim()
+            val candidates = mutableListOf<String>()
+            candidates.add(trimmedInput)
+            if (trimmedInput.startsWith("room_", ignoreCase = true)) {
+                candidates.add("ROOM_" + trimmedInput.substring(5))
+            } else if (!trimmedInput.startsWith("ROOM_")) {
+                candidates.add("ROOM_" + trimmedInput)
+            }
+
+            fun tryJoin(index: Int) {
+                if (index >= candidates.size) {
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        android.widget.Toast.makeText(context, "Room not found. Please check the Room ID.", android.widget.Toast.LENGTH_LONG).show()
+                    }
+                    return
+                }
+                val candidateId = candidates[index]
+                roomsRef.child(candidateId).addListenerForSingleValueEvent(object : ValueEventListener {
+                    override fun onDataChange(snapshot: DataSnapshot) {
+                        if (snapshot.exists() && snapshot.child("Host_Email").exists()) {
+                            performActualJoin(context, myEmail, candidateId)
+                        } else {
+                            tryJoin(index + 1)
+                        }
+                    }
+                    override fun onCancelled(error: DatabaseError) {
+                        tryJoin(index + 1)
+                    }
+                })
+            }
+            tryJoin(0)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error joining room", e)
+        }
+    }
+
+    private fun performActualJoin(context: Context, myEmail: String, roomId: String) {
+        try {
+            val dbUrl = FirebaseConfig.getDatabaseUrl(context)
+            if (dbUrl.isEmpty()) return
+
+            val database = FirebaseDatabase.getInstance(dbUrl)
+            val sanitizedMyEmail = sanitizeEmailForRoom(myEmail)
+            val legacySanitizedMyEmail = DevicePresenceManager.sanitizeEmail(myEmail)
             val trueTime = TimeEngine.getTrueTimeMs()
 
             // Save joined roomId in SharedPreferences for low-data reconnect queries
             val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
             prefs.edit().putString("last_joined_room_id_$sanitizedMyEmail", roomId).apply()
+            prefs.edit().putString("last_joined_room_id_$legacySanitizedMyEmail", roomId).apply()
 
-            // Update participant list first
-            database.getReference("FOCUS_TIMMER")
+            // Update participant list under both sanitizations to be absolutely safe and compatible with other devices!
+            val roomParticipantsRef = database.getReference("FOCUS_TIMMER")
                 .child("SHARED_ROOMS")
                 .child(roomId)
                 .child("Participants")
-                .child(sanitizedMyEmail)
-                .setValue(trueTime)
+
+            roomParticipantsRef.child(sanitizedMyEmail).setValue(trueTime)
+            if (sanitizedMyEmail != legacySanitizedMyEmail) {
+                roomParticipantsRef.child(legacySanitizedMyEmail).setValue(trueTime)
+            }
 
             // Start listening to the room
             listenToRoom(context, myEmail, roomId)
-
+            
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                android.widget.Toast.makeText(context, "Successfully joined the room!", android.widget.Toast.LENGTH_SHORT).show()
+            }
         } catch (e: Exception) {
-            Log.e(TAG, "Error joining room", e)
+            Log.e(TAG, "Error in performActualJoin", e)
         }
     }
 
@@ -136,11 +200,13 @@ object FocusLockerManager {
             if (dbUrl.isEmpty()) return
 
             val database = FirebaseDatabase.getInstance(dbUrl)
-            val sanitizedMyEmail = DevicePresenceManager.sanitizeEmail(myEmail)
+            val sanitizedMyEmail = sanitizeEmailForRoom(myEmail)
+            val legacySanitizedMyEmail = DevicePresenceManager.sanitizeEmail(myEmail)
 
             // Clear joined roomId from SharedPreferences
             val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
             prefs.edit().remove("last_joined_room_id_$sanitizedMyEmail").apply()
+            prefs.edit().remove("last_joined_room_id_$legacySanitizedMyEmail").apply()
 
             // Remove participant node
             database.getReference("FOCUS_TIMMER")
@@ -148,6 +214,13 @@ object FocusLockerManager {
                 .child(currentRoomId)
                 .child("Participants")
                 .child(sanitizedMyEmail)
+                .removeValue()
+
+            database.getReference("FOCUS_TIMMER")
+                .child("SHARED_ROOMS")
+                .child(currentRoomId)
+                .child("Participants")
+                .child(legacySanitizedMyEmail)
                 .removeValue()
 
             // If the leaving user is the host, end the room entirely
@@ -199,7 +272,18 @@ object FocusLockerManager {
                             val joinTs = child.getValue(Long::class.java) ?: 0L
                             
                             // Reconstruct plain email or approximate it
-                            val rawEmail = sanitized.replace("_dot_", ".").replace("_at_", "@")
+                            val rawEmail = if (sanitized.contains("_at_") || sanitized.contains("_dot_")) {
+                                sanitized.replace("_dot_", ".").replace("_at_", "@")
+                            } else {
+                                if (sanitized.contains("@")) {
+                                    val parts = sanitized.split("@")
+                                    val local = parts[0]
+                                    val domain = parts[1].replace("_", ".")
+                                    "$local@$domain"
+                                } else {
+                                    sanitized.replace("_", ".")
+                                }
+                            }
                             val displayName = getFallbackDisplayName(rawEmail)
                             participantsList.add(
                                 ParticipantInfo(
@@ -212,13 +296,15 @@ object FocusLockerManager {
                         }
                     }
 
-                    val isHost = (myEmail == hostEmail)
+                    val distinctParticipants = participantsList.distinctBy { it.email.lowercase().trim() }
+
+                    val isHost = (myEmail.lowercase().trim() == hostEmail.lowercase().trim())
 
                     _uiState.value = FocusLockerUiModel(
                         roomId = roomId,
                         roomName = roomName,
                         hostEmail = hostEmail,
-                        participants = participantsList,
+                        participants = distinctParticipants,
                         isHost = isHost
                     )
                 }
@@ -253,11 +339,15 @@ object FocusLockerManager {
             if (dbUrl.isEmpty()) return
 
             val database = FirebaseDatabase.getInstance(dbUrl)
-            val sanitizedMyEmail = DevicePresenceManager.sanitizeEmail(myEmail)
+            val sanitizedMyEmail = sanitizeEmailForRoom(myEmail)
+            val legacySanitizedMyEmail = DevicePresenceManager.sanitizeEmail(myEmail)
             val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
 
             // Step 1: Attempt to check using saved roomId from SharedPreferences first (extremely low-data single-node lookup)
-            val savedRoomId = prefs.getString("last_joined_room_id_$sanitizedMyEmail", "") ?: ""
+            var savedRoomId = prefs.getString("last_joined_room_id_$sanitizedMyEmail", "") ?: ""
+            if (savedRoomId.isBlank()) {
+                savedRoomId = prefs.getString("last_joined_room_id_$legacySanitizedMyEmail", "") ?: ""
+            }
             if (savedRoomId.isNotBlank()) {
                 val roomRef = database.getReference("FOCUS_TIMMER")
                     .child("SHARED_ROOMS")
@@ -266,23 +356,23 @@ object FocusLockerManager {
                     override fun onDataChange(snapshot: DataSnapshot) {
                         if (snapshot.exists()) {
                             val participantsSnapshot = snapshot.child("Participants")
-                            if (participantsSnapshot.exists() && participantsSnapshot.hasChild(sanitizedMyEmail)) {
+                            if (participantsSnapshot.exists() && (participantsSnapshot.hasChild(sanitizedMyEmail) || participantsSnapshot.hasChild(legacySanitizedMyEmail))) {
                                 Log.i(TAG, "Auto-reconnect (Saved Room): Found active participant entry in roomId: $savedRoomId. Reconnecting...")
-                                joinRoom(context, myEmail, savedRoomId)
+                                performActualJoin(context, myEmail, savedRoomId)
                                 return
                             }
                         }
-                        // If room doesn't exist or we are not in it, fall back to the indexed query
-                        queryExistingRooms(context, myEmail, database, sanitizedMyEmail, prefs)
+                        // If room doesn't exist or we are not in it, fall back to the query
+                        queryExistingRooms(context, myEmail, database, sanitizedMyEmail, legacySanitizedMyEmail, prefs)
                     }
 
                     override fun onCancelled(error: DatabaseError) {
                         Log.e(TAG, "Auto-reconnect (Saved Room): check cancelled", error.toException())
-                        queryExistingRooms(context, myEmail, database, sanitizedMyEmail, prefs)
+                        queryExistingRooms(context, myEmail, database, sanitizedMyEmail, legacySanitizedMyEmail, prefs)
                     }
                 })
             } else {
-                queryExistingRooms(context, myEmail, database, sanitizedMyEmail, prefs)
+                queryExistingRooms(context, myEmail, database, sanitizedMyEmail, legacySanitizedMyEmail, prefs)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error in checkForExistingRoomsAndReconnect", e)
@@ -294,21 +384,20 @@ object FocusLockerManager {
         myEmail: String,
         database: FirebaseDatabase,
         sanitizedMyEmail: String,
+        legacySanitizedMyEmail: String,
         prefs: android.content.SharedPreferences
     ) {
         try {
             val roomsRef = database.getReference("FOCUS_TIMMER").child("SHARED_ROOMS")
-            // Step 2: Use highly selective query filter instead of reading entire SHARED_ROOMS branch
-            val query = roomsRef.orderByChild("Participants/$sanitizedMyEmail").startAt(1.0)
-            query.addListenerForSingleValueEvent(object : ValueEventListener {
+            roomsRef.addListenerForSingleValueEvent(object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
                     if (snapshot.exists()) {
                         for (roomSnapshot in snapshot.children) {
                             val participantsSnapshot = roomSnapshot.child("Participants")
-                            if (participantsSnapshot.exists() && participantsSnapshot.hasChild(sanitizedMyEmail)) {
+                            if (participantsSnapshot.exists() && (participantsSnapshot.hasChild(sanitizedMyEmail) || participantsSnapshot.hasChild(legacySanitizedMyEmail))) {
                                 val roomId = roomSnapshot.key ?: continue
                                 Log.i(TAG, "Auto-reconnect (Query): Found existing focus group participant entry in roomId: $roomId. Reconnecting...")
-                                joinRoom(context, myEmail, roomId)
+                                performActualJoin(context, myEmail, roomId)
                                 break // Only reconnect to the first found room
                             }
                         }
@@ -320,7 +409,7 @@ object FocusLockerManager {
                 }
             })
         } catch (ex: Exception) {
-            Log.e(TAG, "Error performing selective room query reconnection", ex)
+            Log.e(TAG, "Error performing room query reconnection", ex)
         }
     }
 }

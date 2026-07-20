@@ -3432,7 +3432,8 @@ class AppViewModel(
         val googleAccount = com.google.android.gms.auth.api.signin.GoogleSignIn.getLastSignedInAccount(getApplication())
         val prefs = getApplication<android.app.Application>().getSharedPreferences("app_prefs", android.content.Context.MODE_PRIVATE)
         val savedUsername = prefs.getString("current_username", "Guest") ?: "Guest"
-        return googleAccount?.email ?: prefs.getString("user_email_$savedUsername", "") ?: "$savedUsername@gmail.com"
+        val email = googleAccount?.email ?: prefs.getString("user_email_$savedUsername", "") ?: ""
+        return if (email.isNotBlank()) email else "$savedUsername@gmail.com"
     }
 
     fun lazyFetchAndCacheDailyLedger(dateString: String) {
