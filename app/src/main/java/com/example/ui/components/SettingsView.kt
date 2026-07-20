@@ -235,7 +235,7 @@ fun SettingsView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                 items = listOf(
                     SettingsRowData("13. SECURE APP LOCK", "Verify code settings, PIN setups, recover questions", Icons.Default.Lock, Color(0xFFE91E63)) { activePage = 13 },
                     SettingsRowData("14. BLOCKS & SCREEN LIMITS", "Establish application constraints, usage warnings", Icons.Default.Block, Color(0xFFD32F2F)) { activePage = 14 },
-                    SettingsRowData("15. PERMISSIONS & API CONNECTIONS", "Manage system permissions and Google Drive", Icons.Default.CheckCircle, Color(0xFF4CAF50)) { activePage = 19 }
+                    SettingsRowData("15. PERMISSIONS & API CONNECTIONS", "Manage system permissions, Google Drive, and Keep Notes", Icons.Default.CheckCircle, Color(0xFF4CAF50)) { activePage = 19 }
                 )
             ),
             SettingsCategoryData(
@@ -8127,6 +8127,7 @@ fun PermissionsSettingsSection(viewModel: AppViewModel) {
     var hasGoogleTasksPermission by remember { mutableStateOf(false) }
     var hasGoogleFitPermission by remember { mutableStateOf(false) }
     var hasGooglePhotosPermission by remember { mutableStateOf(false) }
+    var hasGoogleKeepPermission by remember { mutableStateOf(false) }
     
     var hasExactAlarmPermission by remember { mutableStateOf(false) }
     var hasNotificationListenerPermission by remember { mutableStateOf(false) }
@@ -8159,6 +8160,7 @@ fun PermissionsSettingsSection(viewModel: AppViewModel) {
         hasGoogleTasksPermission = hasGoogleScope(context, "https://www.googleapis.com/auth/tasks")
         hasGoogleFitPermission = GoogleFitSyncManager.hasFitPermission(context)
         hasGooglePhotosPermission = hasGoogleScope(context, "https://www.googleapis.com/auth/photoslibrary.readonly")
+        hasGoogleKeepPermission = hasGoogleScope(context, "https://www.googleapis.com/auth/drive.appdata")
 
         hasExactAlarmPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
@@ -8460,6 +8462,28 @@ fun PermissionsSettingsSection(viewModel: AppViewModel) {
                     } else {
                         scope.launch {
                             com.example.util.GooglePhotosSyncManager.getAccessToken(context) { intent ->
+                                authResolutionLauncher.launch(intent)
+                            }
+                        }
+                    }
+                }
+            }
+        )
+
+        PermissionItem(
+            title = "Keep Notes Integration (Google Keep)",
+            description = "Sync with Google Keep AppData file to keep personal notes and media attachments aligned.",
+            isGranted = hasGoogleKeepPermission,
+            onClick = {
+                if (!hasGoogleKeepPermission) {
+                    val googleAccount = GoogleSignIn.getLastSignedInAccount(context)
+                    if (googleAccount == null) {
+                        triggerGoogleSignInForScopes(listOf(
+                            com.google.android.gms.common.api.Scope("https://www.googleapis.com/auth/drive.appdata")
+                        ))
+                    } else {
+                        scope.launch {
+                            com.example.util.GoogleDriveSyncManager.getAccessToken(context) { intent ->
                                 authResolutionLauncher.launch(intent)
                             }
                         }

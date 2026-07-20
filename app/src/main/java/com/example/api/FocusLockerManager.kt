@@ -111,7 +111,12 @@ object FocusLockerManager {
 
         try {
             val dbUrl = FirebaseConfig.getDatabaseUrl(context)
-            if (dbUrl.isEmpty()) return
+            if (dbUrl.isEmpty()) {
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    android.widget.Toast.makeText(context, "Firebase DB URL is empty!", android.widget.Toast.LENGTH_LONG).show()
+                }
+                return
+            }
 
             val database = FirebaseDatabase.getInstance(dbUrl)
             val roomsRef = database.getReference("FOCUS_TIMMER").child("SHARED_ROOMS")
@@ -119,30 +124,52 @@ object FocusLockerManager {
             // Normalize entered Room ID candidates (handles case variations and numeric-only entries)
             val trimmedInput = roomId.trim()
             val candidates = mutableListOf<String>()
+            
+            // Add exact entered input
             candidates.add(trimmedInput)
+            
+            // Add case-normalized and prefix-aware formats
             if (trimmedInput.startsWith("room_", ignoreCase = true)) {
-                candidates.add("ROOM_" + trimmedInput.substring(5))
+                val numPart = trimmedInput.substring(5)
+                candidates.add("ROOM_" + numPart)
             } else if (!trimmedInput.startsWith("ROOM_")) {
                 candidates.add("ROOM_" + trimmedInput)
             }
 
+            val distinctCandidates = candidates.distinct()
+            Log.d(TAG, "Attempting to join room with input: '$roomId'. Candidates to try: $distinctCandidates")
+
             fun tryJoin(index: Int) {
-                if (index >= candidates.size) {
+                if (index >= distinctCandidates.size) {
                     android.os.Handler(android.os.Looper.getMainLooper()).post {
                         android.widget.Toast.makeText(context, "Room not found. Please check the Room ID.", android.widget.Toast.LENGTH_LONG).show()
                     }
                     return
                 }
-                val candidateId = candidates[index]
+                val candidateId = distinctCandidates[index]
+                Log.d(TAG, "Querying Firebase for room ID candidate: '$candidateId'")
                 roomsRef.child(candidateId).addListenerForSingleValueEvent(object : ValueEventListener {
                     override fun onDataChange(snapshot: DataSnapshot) {
-                        if (snapshot.exists() && snapshot.child("Host_Email").exists()) {
-                            performActualJoin(context, myEmail, candidateId)
+                        Log.d(TAG, "onDataChange for '$candidateId': exists=${snapshot.exists()}, hasHost=${snapshot.child("Host_Email").exists()}")
+                        if (snapshot.exists()) {
+                            val hostEmailExists = snapshot.child("Host_Email").exists()
+                            if (hostEmailExists) {
+                                Log.i(TAG, "Successfully found room '$candidateId' with host. Performing join...")
+                                performActualJoin(context, myEmail, candidateId)
+                            } else {
+                                Log.w(TAG, "Room snapshot exists for '$candidateId', but 'Host_Email' is missing!")
+                                tryJoin(index + 1)
+                            }
                         } else {
                             tryJoin(index + 1)
                         }
                     }
+
                     override fun onCancelled(error: DatabaseError) {
+                        Log.e(TAG, "Firebase query cancelled for '$candidateId': ${error.message} (code: ${error.code})")
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            android.widget.Toast.makeText(context, "Firebase error: ${error.message}", android.widget.Toast.LENGTH_SHORT).show()
+                        }
                         tryJoin(index + 1)
                     }
                 })

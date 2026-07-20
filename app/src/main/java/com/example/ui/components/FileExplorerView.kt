@@ -56,7 +56,10 @@ data class ExplorerFile(
     val fileMime: String,
     val path: String = "",
     val onClick: () -> Unit,
-    val appFileRef: com.example.data.AppFile? = null
+    val appFileRef: com.example.data.AppFile? = null,
+    val googleDocRef: com.example.util.GoogleDriveSyncManager.GoogleDocFile? = null,
+    val googleSheetRef: com.example.util.GoogleDriveSyncManager.GoogleSheetFile? = null,
+    val googleDriveRef: com.example.util.GoogleDriveSyncManager.GoogleDriveFileItem? = null
 )
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -66,6 +69,7 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
     val journalEntries by viewModel.journalEntries.collectAsState()
     val tasks by viewModel.tasks.collectAsState()
     val contacts by viewModel.contacts.collectAsState()
+    val keepNotes by viewModel.keepNotes.collectAsState()
     
     var longPressedFile by remember { mutableStateOf<ExplorerFile?>(null) }
     var activePreviewFile by remember { mutableStateOf<ExplorerFile?>(null) }
@@ -75,6 +79,26 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
     var fileToRename by remember { mutableStateOf<ExplorerFile?>(null) }
     var renameInputName by remember { mutableStateOf("") }
     var fileToShare by remember { mutableStateOf<ExplorerFile?>(null) }
+
+    // Google Drive v3 specific UI state variables
+    var activeGoogleFileDetails by remember { mutableStateOf<org.json.JSONObject?>(null) }
+    var isLoadingGoogleDetails by remember { mutableStateOf(false) }
+    
+    var activeFileForPermissions by remember { mutableStateOf<ExplorerFile?>(null) }
+    var permissionsList by remember { mutableStateOf<org.json.JSONArray?>(null) }
+    var isLoadingPermissions by remember { mutableStateOf(false) }
+    var sharePermissionEmail by remember { mutableStateOf("") }
+    var sharePermissionRole by remember { mutableStateOf("reader") }
+    
+    var activeFileForComments by remember { mutableStateOf<ExplorerFile?>(null) }
+    var commentsList by remember { mutableStateOf<org.json.JSONArray?>(null) }
+    var isLoadingComments by remember { mutableStateOf(false) }
+    var newCommentText by remember { mutableStateOf("") }
+    
+    var activeFileForRevisions by remember { mutableStateOf<ExplorerFile?>(null) }
+    var revisionsList by remember { mutableStateOf<org.json.JSONArray?>(null) }
+    var isLoadingRevisions by remember { mutableStateOf(false) }
+    var googleDriveAboutInfo by remember { mutableStateOf<org.json.JSONObject?>(null) }
 
     // Google Drive Integration State
     val googleAccount = remember { com.google.android.gms.auth.api.signin.GoogleSignIn.getLastSignedInAccount(context) }
@@ -315,9 +339,82 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
         list
     }
 
+    // Gather files from Keep Notes (Google Notes)
+    val keepNoteFiles = remember(keepNotes) {
+        val list = mutableListOf<ExplorerFile>()
+        val sdf = java.text.SimpleDateFormat("dd MMM", java.util.Locale.getDefault())
+        val attachmentsRegex = Regex("""\[Attachments: ([^\]]+)\]""")
+        val singleAttachmentRegex = Regex("""\[Attachment: ([^\]]+)\]""")
+        
+        keepNotes.forEach { note ->
+            val match = attachmentsRegex.find(note.content)
+            val attachmentsList = if (match != null) {
+                match.groupValues[1].split(";;").filter { it.isNotEmpty() }
+            } else {
+                val oldMatch = singleAttachmentRegex.find(note.content)
+                val oldAtt = oldMatch?.groupValues?.get(1)?.trim() ?: ""
+                if (oldAtt.isNotEmpty()) listOf(oldAtt) else emptyList()
+            }
+            
+            attachmentsList.forEach { attachString ->
+                val type = when {
+                    attachString.startsWith("photo:") -> "image"
+                    attachString.startsWith("video:") -> "video"
+                    attachString.startsWith("audio:") -> "audio"
+                    attachString.startsWith("file:") -> "others"
+                    else -> "others"
+                }
+                
+                val path = when {
+                    attachString.startsWith("photo:") -> attachString.removePrefix("photo:")
+                    attachString.startsWith("video:") -> attachString.removePrefix("video:")
+                    attachString.startsWith("audio:") -> attachString.removePrefix("audio:")
+                    attachString.startsWith("file:") -> {
+                        val filePart = attachString.removePrefix("file:").split("|path:")
+                        filePart.getOrNull(1) ?: ""
+                    }
+                    else -> attachString
+                }
+                
+                val name = when {
+                    attachString.startsWith("file:") -> {
+                        val filePart = attachString.removePrefix("file:").split("|path:")
+                        filePart.getOrNull(0) ?: "Attachment File"
+                    }
+                    else -> path.substringAfterLast("/")
+                }
+                
+                val fileMime = when (type) {
+                    "image" -> "image/png"
+                    "video" -> "video/mp4"
+                    "audio" -> "audio/mpeg"
+                    else -> {
+                        if (name.lowercase().endsWith(".pdf")) "application/pdf"
+                        else if (name.lowercase().endsWith(".txt")) "text/plain"
+                        else "application/octet-stream"
+                    }
+                }
+                
+                list.add(
+                    ExplorerFile(
+                        name = name,
+                        type = type,
+                        dateText = sdf.format(java.util.Date(note.timestamp)),
+                        timestamp = note.timestamp,
+                        sourceName = "Note: ${note.title.ifEmpty { "Untitled Note" }}",
+                        fileMime = fileMime,
+                        path = path,
+                        onClick = {}
+                    )
+                )
+            }
+        }
+        list
+    }
+
     // 5. Merge all files sorted by descending timestamp (recent files on top)
-    val allExplorerFiles = remember(journalFiles, taskFiles, contactFiles, dbFiles) {
-        (journalFiles + taskFiles + contactFiles + dbFiles).sortedByDescending { it.timestamp }
+    val allExplorerFiles = remember(journalFiles, taskFiles, contactFiles, dbFiles, keepNoteFiles) {
+        (journalFiles + taskFiles + contactFiles + dbFiles + keepNoteFiles).sortedByDescending { it.timestamp }
     }
 
     // Navigation and folder states
@@ -461,13 +558,22 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
             viewModel.fetchGoogleDriveFiles(context, currentFolderId) { intent ->
                 sheetsAuthLauncher.launch(intent)
             }
+            viewModel.fetchGoogleDriveAbout(
+                context = context,
+                onSuccess = { about ->
+                    googleDriveAboutInfo = about
+                },
+                onFailure = {
+                    // silent failure or log
+                }
+            )
         } else if (activeFolder == "Journal" || activeFolder == "Tasks" || activeFolder == "Contacts" || activeFolder == "General") {
             viewModel.syncFolderWithFirebase(activeFolder!!)
         }
     }
 
     if (selectedDocUrl != null) {
-        GoogleDocumentViewer(title = selectedDocTitle, docUrl = selectedDocUrl!!) {
+        GoogleDocumentViewer(viewModel = viewModel, title = selectedDocTitle, docUrl = selectedDocUrl!!) {
             selectedDocUrl = null
         }
         return
@@ -513,8 +619,19 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
              (!it.sourceName.contains("Journal", ignoreCase = true) &&
               !it.sourceName.contains("Task", ignoreCase = true) &&
               !it.sourceName.contains("Contact", ignoreCase = true) &&
+              !it.sourceName.startsWith("Note:", ignoreCase = true) &&
+              !it.sourceName.contains("(Google Notes)", ignoreCase = true) &&
+              !it.sourceName.contains("(Google Keep)", ignoreCase = true) &&
               it.sourceName.startsWith("Uploaded", ignoreCase = true))) &&
             !(it.appFileRef?.path?.startsWith("Friends") ?: false)
+        }
+    }
+
+    val folderGoogleNotesFiles = remember(allExplorerFiles) {
+        allExplorerFiles.filter {
+            it.sourceName.startsWith("Note:", ignoreCase = true) ||
+            it.sourceName.contains("(Google Notes)", ignoreCase = true) ||
+            it.sourceName.contains("(Google Keep)", ignoreCase = true)
         }
     }
 
@@ -528,7 +645,7 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
 
     Scaffold(
         floatingActionButton = {
-            val isCloudFolder = activeFolder == "Google Sheets" || activeFolder == "Google Docs" || activeFolder == "Google Drive" || activeFolder == "Google Notes" || activeFolder == "Google Keep"
+            val isCloudFolder = activeFolder == "Google Sheets" || activeFolder == "Google Docs" || activeFolder == "Google Drive" || activeFolder == "Google Notes" || activeFolder == "Google Keep" || activeFolder == "Keep Notes"
             if (activeExplorerTab == "Folders" && !isCloudFolder) {
                 FloatingActionButton(
                     onClick = {
@@ -727,7 +844,7 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                             Triple("Tasks", folderTaskFiles.size, Color(0xFF81C784)),
                             Triple("Contacts", folderContactFiles.size, Color(0xFF64B5F6)),
                             Triple("General", folderGeneralFiles.size, Color(0xFFFFB74D)),
-                            Triple("Google Notes", viewModel.keepNotes.value.size, Color(0xFFFF9E0F)),
+                            Triple("Keep Notes", folderGoogleNotesFiles.size, Color(0xFFFF9E0F)),
                             Triple("Friends", folderFriendsFiles.size, Color(0xFFAB47BC)),
                             Triple("Google Sheets", googleSheets.size, Color(0xFF0F9D58)),
                             Triple("Google Docs", googleDocs.size, Color(0xFF4285F4)),
@@ -743,7 +860,7 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                                 "Google Sheets" -> Icons.Default.InsertDriveFile
                                 "Google Docs" -> Icons.Default.Description
                                 "Google Drive" -> Icons.Default.CloudQueue
-                                "Google Notes" -> Icons.Default.NoteAlt
+                                "Keep Notes" -> Icons.Default.NoteAlt
                                 "Friends" -> Icons.Default.PeopleOutline
                                 else -> Icons.Default.FolderOpen
                             }
@@ -1271,36 +1388,111 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                                         }
                                     }
                                 }
-                            } else if (googleDriveFiles.isEmpty()) {
-                                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(16.dp)) {
-                                        Icon(Icons.Default.CloudQueue, contentDescription = null, modifier = Modifier.size(48.dp), tint = Color.Gray)
-                                        Spacer(modifier = Modifier.height(12.dp))
-                                        Text("This folder is empty.", color = Color.LightGray)
-                                        Spacer(modifier = Modifier.height(16.dp))
-                                        Button(
-                                            onClick = { showCreateDriveFolderDialog = true },
-                                            colors = ButtonDefaults.buttonColors(containerColor = WaterBlue)
-                                        ) {
-                                            Icon(Icons.Default.Folder, contentDescription = null, tint = Color.Black)
-                                            Spacer(modifier = Modifier.width(8.dp))
-                                            Text("Create Subfolder", color = Color.Black, fontWeight = FontWeight.Bold)
-                                        }
-                                    }
-                                }
                             } else {
                                 Column(modifier = Modifier.fillMaxSize()) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            text = "DRIVE ITEMS (${googleDriveFiles.size})",
-                                            color = Color.Gray,
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
+                                    // 1. Google Drive Quota / About Info Card
+                                    if (googleDriveAboutInfo != null) {
+                                        val about = googleDriveAboutInfo!!
+                                        val userObj = about.optJSONObject("user")
+                                        val userName = userObj?.optString("displayName") ?: ""
+                                        val userEmail = userObj?.optString("emailAddress") ?: ""
+                                        
+                                        val storageQuotaObj = about.optJSONObject("storageQuota")
+                                        val limitVal = storageQuotaObj?.optLong("limit", 0L) ?: 0L
+                                        val usageVal = storageQuotaObj?.optLong("usage", 0L) ?: 0L
+                                        
+                                        val limitGb = limitVal.toDouble() / (1024 * 1024 * 1024)
+                                        val usageGb = usageVal.toDouble() / (1024 * 1024 * 1024)
+                                        val usagePercent = if (limitVal > 0) (usageVal.toDouble() / limitVal * 100).toInt() else 0
+                                        
+                                        Card(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(bottom = 12.dp),
+                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E20)),
+                                            border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.05f))
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(12.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.CloudQueue, 
+                                                    contentDescription = null, 
+                                                    tint = Color(0xFF4285F4), 
+                                                    modifier = Modifier.size(32.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(12.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    if (userName.isNotEmpty() || userEmail.isNotEmpty()) {
+                                                        Text(
+                                                            text = if (userName.isNotEmpty()) userName else userEmail,
+                                                            color = Color.White,
+                                                            fontSize = 12.sp,
+                                                            fontWeight = FontWeight.Bold
+                                                        )
+                                                        if (userName.isNotEmpty() && userEmail.isNotEmpty()) {
+                                                            Text(userEmail, color = Color.Gray, fontSize = 10.sp)
+                                                        }
+                                                        Spacer(modifier = Modifier.height(4.dp))
+                                                    }
+                                                    Row(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        horizontalArrangement = Arrangement.SpaceBetween
+                                                    ) {
+                                                        Text(
+                                                            text = String.format("%.2f GB of %.2f GB used", usageGb, limitGb),
+                                                            color = Color.LightGray,
+                                                            fontSize = 10.sp
+                                                        )
+                                                        Text(
+                                                            text = "$usagePercent%",
+                                                            color = if (usagePercent > 85) Color(0xFFEF5350) else Color(0xFF81C784),
+                                                            fontSize = 10.sp,
+                                                            fontWeight = FontWeight.Bold
+                                                        )
+                                                    }
+                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                    androidx.compose.material3.LinearProgressIndicator(
+                                                        progress = { if (limitVal > 0) (usageVal.toFloat() / limitVal) else 0f },
+                                                        modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
+                                                        color = if (usagePercent > 85) Color(0xFFEF5350) else Color(0xFF4285F4),
+                                                        trackColor = Color.White.copy(alpha = 0.1f)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if (googleDriveFiles.isEmpty()) {
+                                        Box(modifier = Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                                            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(16.dp)) {
+                                                Icon(Icons.Default.CloudQueue, contentDescription = null, modifier = Modifier.size(48.dp), tint = Color.Gray)
+                                                Spacer(modifier = Modifier.height(12.dp))
+                                                Text("This folder is empty.", color = Color.LightGray)
+                                                Spacer(modifier = Modifier.height(16.dp))
+                                                Button(
+                                                    onClick = { showCreateDriveFolderDialog = true },
+                                                    colors = ButtonDefaults.buttonColors(containerColor = WaterBlue)
+                                                ) {
+                                                    Icon(Icons.Default.Folder, contentDescription = null, tint = Color.Black)
+                                                    Spacer(modifier = Modifier.width(8.dp))
+                                                    Text("Create Subfolder", color = Color.Black, fontWeight = FontWeight.Bold)
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "DRIVE ITEMS (${googleDriveFiles.size})",
+                                                color = Color.Gray,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
                                         Button(
                                             onClick = { showCreateDriveFolderDialog = true },
                                             colors = ButtonDefaults.buttonColors(containerColor = WaterBlue),
@@ -1393,10 +1585,8 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                                 }
                             }
                         }
-                        "Google Notes" -> {
-                            KeepNotesView(viewModel = viewModel, modifier = Modifier.fillMaxSize())
-                        }
-                        "Friends" -> {
+                    }
+                    "Friends" -> {
                             FriendsFolderView(
                                 viewModel = viewModel,
                                 context = context,
@@ -1417,6 +1607,9 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                                 "Journal" -> folderJournalFiles
                                 "Tasks" -> folderTaskFiles
                                 "Contacts" -> folderContactFiles
+                                "Keep Notes" -> folderGoogleNotesFiles
+                                "Google Notes" -> folderGoogleNotesFiles
+                                "Google Keep" -> folderGoogleNotesFiles
                                 else -> folderGeneralFiles
                             }
 
@@ -1589,14 +1782,14 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                                                     },
                                                     modifier = Modifier
                                                         .align(Alignment.BottomEnd)
-                                                        .padding(2.dp)
-                                                        .size(24.dp)
+                                                        .padding(0.dp)
+                                                        .size(32.dp)
                                                 ) {
                                                     Icon(
                                                         imageVector = Icons.Default.MoreVert,
                                                         contentDescription = "Options",
                                                         tint = Color.Gray,
-                                                        modifier = Modifier.size(14.dp)
+                                                        modifier = Modifier.size(24.dp)
                                                     )
                                                 }
 
@@ -3323,17 +3516,9 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
         
         LaunchedEffect(selectedFileUri) {
             if (selectedFileUri != null) {
-                // Background Upload flow simulations
                 mockUploadingFileName = uploadFileName.ifEmpty { "Selected File" }
                 scope.launch {
-                    mockUploadProgress = 0.1f
-                    kotlinx.coroutines.delay(400)
-                    mockUploadProgress = 0.4f
-                    kotlinx.coroutines.delay(500)
-                    mockUploadProgress = 0.8f
-                    kotlinx.coroutines.delay(400)
-                    mockUploadProgress = 1.0f
-                    
+                    // 1. IMMEDIATELY COPY & BRING TO LOCAL DATABASE INSTANTLY
                     val sandboxFile = com.example.util.StorageHelper.copyFileToInternalSandbox(context, selectedFileUri!!)
                     if (sandboxFile != null && sandboxFile.exists()) {
                         viewModel.addFile(
@@ -3343,10 +3528,22 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                             mimeType = selectedFileMimeType,
                             uriString = sandboxFile.absolutePath
                         )
-                        if (com.example.util.GoogleDriveSyncManager.hasDrivePermission(context)) {
-                            com.example.util.GoogleDriveSyncManager.backupAllAppData(context, viewModel.appDatabase)
-                        }
                     }
+
+                    // 2. RUN BACKGROUND SIMULATION AND CLOUD BACKUP
+                    mockUploadProgress = 0.1f
+                    kotlinx.coroutines.delay(300)
+                    mockUploadProgress = 0.4f
+                    kotlinx.coroutines.delay(300)
+                    mockUploadProgress = 0.7f
+                    
+                    if (sandboxFile != null && sandboxFile.exists() && com.example.util.GoogleDriveSyncManager.hasDrivePermission(context)) {
+                        com.example.util.GoogleDriveSyncManager.backupAllAppData(context, viewModel.appDatabase)
+                    }
+                    
+                    mockUploadProgress = 1.0f
+                    kotlinx.coroutines.delay(200)
+                    
                     android.widget.Toast.makeText(context, "Successfully uploaded to $uploadFolderCategory!", android.widget.Toast.LENGTH_SHORT).show()
                     mockUploadProgress = null
                     selectedFileUri = null
@@ -3354,30 +3551,46 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
             }
         }
 
-        // Background Sync visualizer overlay
+        // Background Sync visualizer overlay (Non-blocking, non-modal floating banner)
         if (mockUploadProgress != null) {
-            Dialog(onDismissRequest = {}) {
+            androidx.compose.ui.window.Popup(
+                alignment = Alignment.BottomCenter,
+                properties = androidx.compose.ui.window.PopupProperties(
+                    focusable = false,
+                    dismissOnBackPress = false,
+                    dismissOnClickOutside = false
+                )
+            ) {
                 Surface(
                     color = Color(0xFF12131A),
                     shape = RoundedCornerShape(12.dp),
                     border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)),
-                    modifier = Modifier.padding(16.dp)
+                    shadowElevation = 8.dp,
+                    modifier = Modifier
+                        .padding(16.dp)
+                        .fillMaxWidth(0.9f)
                 ) {
                     Column(
                         modifier = Modifier.padding(16.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        CircularProgressIndicator(color = WaterBlue, modifier = Modifier.size(36.dp))
-                        Text("Uploading Background Task...", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                        Text(mockUploadingFileName, color = Color.Gray, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            CircularProgressIndicator(color = WaterBlue, modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            Text("Uploading Background Task...", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        }
+                        Text(mockUploadingFileName, color = Color.Gray, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.align(Alignment.Start))
                         LinearProgressIndicator(
                             progress = { mockUploadProgress ?: 0f },
                             color = WaterBlue,
                             trackColor = Color.White.copy(alpha = 0.1f),
                             modifier = Modifier.fillMaxWidth().height(4.dp)
                         )
-                        Text("Backing up to Google Drive & Syncing with Study Group", color = WaterBlue, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        Text("Backing up to Google Drive & Syncing with Study Group", color = WaterBlue, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.Start))
                     }
                 }
             }
@@ -3431,7 +3644,7 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                             imageVector = Icons.Default.MoreVert,
                             contentDescription = null,
                             tint = WaterBlue,
-                            modifier = Modifier.size(22.dp)
+                            modifier = Modifier.size(28.dp)
                         )
                         Text(
                             text = "Options",
@@ -3464,6 +3677,30 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                                 .clickable {
                                     activeFileForDetails = fileNode
                                     activeFileForOptions = null
+                                    
+                                    val fId = when {
+                                        fileNode.googleDocRef != null -> fileNode.googleDocRef.id
+                                        fileNode.googleSheetRef != null -> fileNode.googleSheetRef.id
+                                        fileNode.googleDriveRef != null -> fileNode.googleDriveRef.id
+                                        else -> null
+                                    }
+                                    if (fId != null) {
+                                        isLoadingGoogleDetails = true
+                                        viewModel.fetchGoogleFileDetails(
+                                            context = context,
+                                            fileId = fId,
+                                            onSuccess = { details ->
+                                                activeGoogleFileDetails = details
+                                                isLoadingGoogleDetails = false
+                                            },
+                                            onFailure = { err ->
+                                                isLoadingGoogleDetails = false
+                                                android.widget.Toast.makeText(context, "Could not fetch detailed Google Drive info: $err", android.widget.Toast.LENGTH_SHORT).show()
+                                            }
+                                        )
+                                    } else {
+                                        activeGoogleFileDetails = null
+                                    }
                                 }
                                 .padding(vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -3492,6 +3729,170 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                             Text("Copy Link / Path", color = Color.White, fontSize = 13.sp)
                         }
 
+                        // OPTION: COPY LINK (MAKE PUBLIC EDITOR) for Google Docs, Sheets, or Drive files
+                        if (fileNode.googleDocRef != null || fileNode.googleSheetRef != null || fileNode.googleDriveRef != null) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        val (fId, fType) = when {
+                                            fileNode.googleDocRef != null -> Pair(fileNode.googleDocRef.id, "doc")
+                                            fileNode.googleSheetRef != null -> Pair(fileNode.googleSheetRef.id, "sheet")
+                                            else -> Pair(fileNode.googleDriveRef!!.id, "drive")
+                                        }
+                                        viewModel.makeFilePublicEditorAndGetLink(
+                                            context = context,
+                                            fileId = fId,
+                                            fileType = fType,
+                                            onSuccess = { link ->
+                                                android.widget.Toast.makeText(context, "Public editor link copied!", android.widget.Toast.LENGTH_SHORT).show()
+                                            },
+                                            onFailure = { err ->
+                                                android.widget.Toast.makeText(context, err, android.widget.Toast.LENGTH_SHORT).show()
+                                            }
+                                        )
+                                        activeFileForOptions = null
+                                    }
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.ContentCopy, contentDescription = null, tint = Color(0xFFFFCC80), modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(16.dp))
+                                Text("Copy Link (Public Editor)", color = Color.White, fontSize = 13.sp)
+                            }
+                        }
+
+                        // NEW GOOGLE DRIVE v3 OPTIONS
+                        if (fileNode.googleDocRef != null || fileNode.googleSheetRef != null || fileNode.googleDriveRef != null) {
+                            val fId = when {
+                                fileNode.googleDocRef != null -> fileNode.googleDocRef.id
+                                fileNode.googleSheetRef != null -> fileNode.googleSheetRef.id
+                                else -> fileNode.googleDriveRef!!.id
+                            }
+                            
+                            // 1. MAKE A COPY
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        val copyName = "Copy of ${fileNode.name}"
+                                        viewModel.copyGoogleFile(
+                                            context = context,
+                                            fileId = fId,
+                                            copyName = copyName,
+                                            onSuccess = { newId ->
+                                                android.widget.Toast.makeText(context, "Copied file successfully: $copyName", android.widget.Toast.LENGTH_LONG).show()
+                                                if (fileNode.googleDocRef != null) {
+                                                    viewModel.fetchGoogleDocs(context)
+                                                } else if (fileNode.googleSheetRef != null) {
+                                                    viewModel.fetchGoogleSheets(context)
+                                                } else {
+                                                    val currentParentId = if (driveFolderStack.isEmpty()) "root" else driveFolderStack.last().first
+                                                    viewModel.fetchGoogleDriveFiles(context, currentParentId)
+                                                }
+                                            },
+                                            onFailure = { err ->
+                                                android.widget.Toast.makeText(context, "Failed to copy: $err", android.widget.Toast.LENGTH_SHORT).show()
+                                            }
+                                        )
+                                        activeFileForOptions = null
+                                    }
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.ContentCopy, contentDescription = null, tint = Color(0xFFE040FB), modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(16.dp))
+                                Text("Make a Copy", color = Color.White, fontSize = 13.sp)
+                            }
+
+                            // 2. MANAGE PERMISSIONS
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        activeFileForPermissions = fileNode
+                                        isLoadingPermissions = true
+                                        viewModel.fetchGoogleFilePermissions(
+                                            context = context,
+                                            fileId = fId,
+                                            onSuccess = { permissions ->
+                                                permissionsList = permissions
+                                                isLoadingPermissions = false
+                                            },
+                                            onFailure = { err ->
+                                                isLoadingPermissions = false
+                                                android.widget.Toast.makeText(context, "Failed to fetch permissions: $err", android.widget.Toast.LENGTH_SHORT).show()
+                                            }
+                                        )
+                                        activeFileForOptions = null
+                                    }
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.Lock, contentDescription = null, tint = Color(0xFF29B6F6), modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(16.dp))
+                                Text("Manage Permissions", color = Color.White, fontSize = 13.sp)
+                            }
+
+                            // 3. COMMENTS & DISCUSSIONS
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        activeFileForComments = fileNode
+                                        isLoadingComments = true
+                                        viewModel.fetchGoogleFileComments(
+                                            context = context,
+                                            fileId = fId,
+                                            onSuccess = { comments ->
+                                                commentsList = comments
+                                                isLoadingComments = false
+                                            },
+                                            onFailure = { err ->
+                                                isLoadingComments = false
+                                                android.widget.Toast.makeText(context, "Failed to fetch comments: $err", android.widget.Toast.LENGTH_SHORT).show()
+                                            }
+                                        )
+                                        activeFileForOptions = null
+                                    }
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.Comment, contentDescription = null, tint = Color(0xFF66BB6A), modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(16.dp))
+                                Text("Comments & Discussions", color = Color.White, fontSize = 13.sp)
+                            }
+
+                            // 4. REVISION HISTORY
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        activeFileForRevisions = fileNode
+                                        isLoadingRevisions = true
+                                        viewModel.fetchGoogleFileRevisions(
+                                            context = context,
+                                            fileId = fId,
+                                            onSuccess = { revisions ->
+                                                revisionsList = revisions
+                                                isLoadingRevisions = false
+                                            },
+                                            onFailure = { err ->
+                                                isLoadingRevisions = false
+                                                android.widget.Toast.makeText(context, "Failed to fetch revisions: $err", android.widget.Toast.LENGTH_SHORT).show()
+                                            }
+                                        )
+                                        activeFileForOptions = null
+                                    }
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.History, contentDescription = null, tint = Color(0xFFFFCA28), modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(16.dp))
+                                Text("Revision History", color = Color.White, fontSize = 13.sp)
+                            }
+                        }
+
                         // OPTION: MARK AS FAVORITE
                         if (fileNode.appFileRef != null) {
                             val isFav = fileNode.appFileRef.isFavorite
@@ -3518,8 +3919,8 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                             }
                         }
 
-                        // OPTION 2: RENAME (Only show if we have local db ref AppFile)
-                        if (fileNode.appFileRef != null) {
+                        // OPTION 2: RENAME (Show for local files or Google files)
+                        if (fileNode.appFileRef != null || fileNode.googleDocRef != null || fileNode.googleSheetRef != null || fileNode.googleDriveRef != null) {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -3542,7 +3943,31 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
-                                    downloadExplorerFile(context, fileNode)
+                                    if (fileNode.googleDocRef != null) {
+                                        viewModel.downloadGoogleFileContent(context, fileNode.googleDocRef.id, fileNode.name, "application/vnd.google-apps.document", onSuccess = {
+                                            // Success Toast is handled inside the VM helper
+                                        }, onFailure = { err ->
+                                            android.widget.Toast.makeText(context, err, android.widget.Toast.LENGTH_SHORT).show()
+                                        })
+                                    } else if (fileNode.googleSheetRef != null) {
+                                        viewModel.downloadGoogleFileContent(context, fileNode.googleSheetRef.id, fileNode.name, "application/vnd.google-apps.spreadsheet", onSuccess = {
+                                            // Success Toast handled inside the VM helper
+                                        }, onFailure = { err ->
+                                            android.widget.Toast.makeText(context, err, android.widget.Toast.LENGTH_SHORT).show()
+                                        })
+                                    } else if (fileNode.googleDriveRef != null) {
+                                        if (fileNode.googleDriveRef.isFolder) {
+                                            android.widget.Toast.makeText(context, "Cannot download folder. Try downloading individual files inside.", android.widget.Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            viewModel.downloadGoogleFileContent(context, fileNode.googleDriveRef.id, fileNode.name, fileNode.googleDriveRef.mimeType, onSuccess = {
+                                                // Success Toast handled inside the VM helper
+                                            }, onFailure = { err ->
+                                                android.widget.Toast.makeText(context, err, android.widget.Toast.LENGTH_SHORT).show()
+                                            })
+                                        }
+                                    } else {
+                                        downloadExplorerFile(context, fileNode)
+                                    }
                                     activeFileForOptions = null
                                 }
                                 .padding(vertical = 8.dp),
@@ -3585,6 +4010,67 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                                 Icon(Icons.Default.Delete, contentDescription = null, tint = Color(0xFFEF5350), modifier = Modifier.size(20.dp))
                                 Spacer(modifier = Modifier.width(16.dp))
                                 Text("Delete File", color = Color.White, fontSize = 13.sp)
+                            }
+                        } else if (fileNode.googleDocRef != null) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        viewModel.deleteGoogleFile(context, fileNode.googleDocRef.id, onSuccess = {
+                                            android.widget.Toast.makeText(context, "Deleted Google Doc successfully!", android.widget.Toast.LENGTH_SHORT).show()
+                                            viewModel.fetchGoogleDocs(context)
+                                        }, onFailure = { err ->
+                                            android.widget.Toast.makeText(context, "Delete failed: $err", android.widget.Toast.LENGTH_SHORT).show()
+                                        })
+                                        activeFileForOptions = null
+                                    }
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.Delete, contentDescription = null, tint = Color(0xFFEF5350), modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(16.dp))
+                                Text("Delete Google Doc", color = Color.White, fontSize = 13.sp)
+                            }
+                        } else if (fileNode.googleSheetRef != null) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        viewModel.deleteGoogleFile(context, fileNode.googleSheetRef.id, onSuccess = {
+                                            android.widget.Toast.makeText(context, "Deleted Google Sheet successfully!", android.widget.Toast.LENGTH_SHORT).show()
+                                            viewModel.fetchGoogleSheets(context)
+                                        }, onFailure = { err ->
+                                            android.widget.Toast.makeText(context, "Delete failed: $err", android.widget.Toast.LENGTH_SHORT).show()
+                                        })
+                                        activeFileForOptions = null
+                                    }
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.Delete, contentDescription = null, tint = Color(0xFFEF5350), modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(16.dp))
+                                Text("Delete Google Sheet", color = Color.White, fontSize = 13.sp)
+                            }
+                        } else if (fileNode.googleDriveRef != null) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        viewModel.deleteGoogleFile(context, fileNode.googleDriveRef.id, onSuccess = {
+                                            android.widget.Toast.makeText(context, "Deleted Google Drive item successfully!", android.widget.Toast.LENGTH_SHORT).show()
+                                            val currentParentId = if (driveFolderStack.isEmpty()) "root" else driveFolderStack.last().first
+                                            viewModel.fetchGoogleDriveFiles(context, currentParentId)
+                                        }, onFailure = { err ->
+                                            android.widget.Toast.makeText(context, "Delete failed: $err", android.widget.Toast.LENGTH_SHORT).show()
+                                        })
+                                        activeFileForOptions = null
+                                    }
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.Delete, contentDescription = null, tint = Color(0xFFEF5350), modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(16.dp))
+                                Text("Delete Drive Item", color = Color.White, fontSize = 13.sp)
                             }
                         }
                     }
@@ -3629,14 +4115,516 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
             }
 
             AlertDialog(
-                onDismissRequest = { activeFileForDetails = null },
+                onDismissRequest = { 
+                    activeFileForDetails = null 
+                    activeGoogleFileDetails = null
+                },
                 title = {
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(Icons.Default.Info, contentDescription = null, tint = WaterBlue, modifier = Modifier.size(22.dp))
-                        Text("File Information Details", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = if (activeGoogleFileDetails != null) "Google Drive File Details" else "File Information Details", 
+                            color = Color.White, 
+                            fontSize = 16.sp, 
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                },
+                text = {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        if (isLoadingGoogleDetails) {
+                            Box(modifier = Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator(color = WaterBlue, modifier = Modifier.size(24.dp))
+                            }
+                        } else if (activeGoogleFileDetails != null) {
+                            val details = activeGoogleFileDetails!!
+                            
+                            Text("FILE NAME", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Text(details.optString("name", fileNode.name), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            
+                            androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = 0.05f))
+                            
+                            val ownersArr = details.optJSONArray("owners")
+                            val ownerObj = ownersArr?.optJSONObject(0)
+                            val ownerName = ownerObj?.optString("displayName") ?: "Unknown Owner"
+                            val ownerEmail = ownerObj?.optString("emailAddress") ?: ""
+                            
+                            Text("OWNER", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Column {
+                                Text(ownerName, color = Color(0xFF81C784), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                if (ownerEmail.isNotEmpty()) {
+                                    Text(ownerEmail, color = Color.Gray, fontSize = 11.sp)
+                                }
+                            }
+                            
+                            androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = 0.05f))
+                            
+                            val createdTime = details.optString("createdTime", "").replace("T", " ").replace("Z", "")
+                            val modifiedTime = details.optString("modifiedTime", "").replace("T", " ").replace("Z", "")
+                            
+                            if (createdTime.isNotEmpty()) {
+                                Text("CREATED TIME (UTC)", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                Text(createdTime, color = Color.White, fontSize = 12.sp)
+                                androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = 0.05f))
+                            }
+                            
+                            if (modifiedTime.isNotEmpty()) {
+                                Text("LAST MODIFIED TIME (UTC)", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                Text(modifiedTime, color = Color.White, fontSize = 12.sp)
+                                androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = 0.05f))
+                            }
+                            
+                            val gSize = details.optLong("size", -1L)
+                            val sizeStr = if (gSize >= 0) {
+                                when {
+                                    gSize > 1024 * 1024 -> String.format("%.2f MB", gSize.toFloat() / (1024 * 1024))
+                                    gSize > 1024 -> String.format("%.2f KB", gSize.toFloat() / 1024)
+                                    else -> "$gSize Bytes"
+                                }
+                            } else {
+                                "N/A (Google Document)"
+                            }
+                            
+                            Text("SIZE", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Text(sizeStr, color = WaterBlue, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            
+                            androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = 0.05f))
+                            
+                            Text("MIME TYPE", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Text(details.optString("mimeType", fileNode.fileMime), color = Color.LightGray, fontSize = 11.sp)
+                            
+                            val desc = details.optString("description", "")
+                            if (desc.isNotEmpty()) {
+                                androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = 0.05f))
+                                Text("DESCRIPTION", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                Text(desc, color = Color.White, fontSize = 12.sp)
+                            }
+                            
+                            val versionVal = details.optString("version", "")
+                            if (versionVal.isNotEmpty()) {
+                                androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = 0.05f))
+                                Text("VERSION", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                Text("v$versionVal", color = Color.White, fontSize = 12.sp)
+                            }
+                            
+                            val labelsObj = details.optJSONObject("labels")
+                            if (labelsObj != null) {
+                                androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = 0.05f))
+                                Text("LABELS", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    val keys = labelsObj.keys()
+                                    while (keys.hasNext()) {
+                                        val key = keys.next()
+                                        val value = labelsObj.opt(key)
+                                        Text("$key: $value", color = Color(0xFFFFCC80), fontSize = 11.sp)
+                                    }
+                                }
+                            }
+                            
+                        } else {
+                            Text("FILE NAME", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Text(fileNode.name, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            
+                            androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = 0.05f))
+                            
+                            Text("ADDED BY / CREATOR", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Text(addedBy, color = Color(0xFF81C784), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            
+                            androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = 0.05f))
+                            
+                            Text("UPLOADED DATE / TIME", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Text(addedAt, color = Color.White, fontSize = 12.sp)
+                            
+                            androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = 0.05f))
+                            
+                            Text("SIZE", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Text(sizeText, color = WaterBlue, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            
+                            androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = 0.05f))
+                            
+                            Text("MIME TYPE", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Text(fileNode.fileMime, color = Color.LightGray, fontSize = 11.sp)
+                        }
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = { 
+                            activeFileForDetails = null 
+                            activeGoogleFileDetails = null
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = WaterBlue, contentColor = Color.White),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("DONE", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                },
+                containerColor = Color(0xFF161618),
+                shape = RoundedCornerShape(16.dp)
+            )
+        }
+
+        // ==========================================
+        // DIALOG: GOOGLE PERMISSIONS
+        // ==========================================
+        if (activeFileForPermissions != null) {
+            val fileNode = activeFileForPermissions!!
+            val fId = when {
+                fileNode.googleDocRef != null -> fileNode.googleDocRef.id
+                fileNode.googleSheetRef != null -> fileNode.googleSheetRef.id
+                else -> fileNode.googleDriveRef!!.id
+            }
+            AlertDialog(
+                onDismissRequest = { activeFileForPermissions = null },
+                title = {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.Lock, contentDescription = null, tint = Color(0xFF29B6F6), modifier = Modifier.size(22.dp))
+                        Text("Manage Permissions", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    }
+                },
+                text = {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(fileNode.name, color = Color.Gray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        
+                        androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+                        // Add new permission UI
+                        Text("ADD NEW USER / ROLE", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        OutlinedTextField(
+                            value = sharePermissionEmail,
+                            onValueChange = { sharePermissionEmail = it },
+                            placeholder = { Text("email@gmail.com or anyone", color = Color.Gray, fontSize = 12.sp) },
+                            textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 12.sp),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Color(0xFF29B6F6),
+                                unfocusedBorderColor = Color.Gray.copy(alpha = 0.5f)
+                            )
+                        )
+
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("ROLE:", color = Color.Gray, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                            listOf("reader", "commenter", "writer").forEach { role ->
+                                val isSelected = sharePermissionRole == role
+                                Box(
+                                    modifier = Modifier
+                                        .clickable { sharePermissionRole = role }
+                                        .background(
+                                            color = if (isSelected) Color(0xFF29B6F6).copy(alpha = 0.2f) else Color.Transparent,
+                                            shape = RoundedCornerShape(4.dp)
+                                        )
+                                        .border(
+                                            width = 1.dp,
+                                            color = if (isSelected) Color(0xFF29B6F6) else Color.White.copy(alpha = 0.15f),
+                                            shape = RoundedCornerShape(4.dp)
+                                        )
+                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                ) {
+                                    Text(
+                                        text = role.replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.getDefault()) else it.toString() },
+                                        color = if (isSelected) Color(0xFF29B6F6) else Color.LightGray,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+
+                        Button(
+                            onClick = {
+                                if (sharePermissionEmail.isBlank()) {
+                                    android.widget.Toast.makeText(context, "Please enter an email address or 'anyone'", android.widget.Toast.LENGTH_SHORT).show()
+                                    return@Button
+                                }
+                                val pType = if (sharePermissionEmail.trim() == "anyone") "anyone" else "user"
+                                val finalEmail = if (pType == "anyone") "" else sharePermissionEmail.trim()
+                                viewModel.addGoogleFilePermission(
+                                    context = context,
+                                    fileId = fId,
+                                    email = finalEmail,
+                                    role = sharePermissionRole,
+                                    type = pType,
+                                    onSuccess = {
+                                        android.widget.Toast.makeText(context, "Successfully shared!", android.widget.Toast.LENGTH_SHORT).show()
+                                        sharePermissionEmail = ""
+                                        // reload
+                                        isLoadingPermissions = true
+                                        viewModel.fetchGoogleFilePermissions(context, fId, onSuccess = {
+                                            permissionsList = it
+                                            isLoadingPermissions = false
+                                        }, onFailure = {
+                                            isLoadingPermissions = false
+                                        })
+                                    },
+                                    onFailure = { err ->
+                                        android.widget.Toast.makeText(context, "Share failed: $err", android.widget.Toast.LENGTH_SHORT).show()
+                                    }
+                                )
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF29B6F6)),
+                            shape = RoundedCornerShape(4.dp),
+                            modifier = Modifier.align(Alignment.End)
+                        ) {
+                            Text("SHARE", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+                        }
+
+                        androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+                        Text("CURRENT DIRECT ACCESS", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+
+                        if (isLoadingPermissions) {
+                            Box(modifier = Modifier.fillMaxWidth().height(100.dp), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator(color = Color(0xFF29B6F6), modifier = Modifier.size(24.dp))
+                            }
+                        } else {
+                            val arr = permissionsList
+                            if (arr == null || arr.length() == 0) {
+                                Text("No direct permissions retrieved or public link.", color = Color.Gray, fontSize = 11.sp)
+                            } else {
+                                Box(modifier = Modifier.heightIn(max = 200.dp)) {
+                                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        items(arr.length()) { idx ->
+                                            val p = arr.optJSONObject(idx) ?: org.json.JSONObject()
+                                            val pId = p.optString("id")
+                                            val pName = p.optString("displayName", "Anyone with Link")
+                                            val pEmail = p.optString("emailAddress", "")
+                                            val pRole = p.optString("role")
+                                            
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .background(Color.White.copy(alpha = 0.02f), shape = RoundedCornerShape(6.dp))
+                                                    .padding(8.dp),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(pName, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                                    if (pEmail.isNotEmpty()) {
+                                                        Text(pEmail, color = Color.Gray, fontSize = 10.sp)
+                                                    }
+                                                    Text(pRole.replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.getDefault()) else it.toString() }, color = Color(0xFF81C784), fontSize = 10.sp)
+                                                }
+                                                
+                                                if (pRole != "owner") {
+                                                    IconButton(
+                                                        onClick = {
+                                                            viewModel.deleteGoogleFilePermission(
+                                                                context = context,
+                                                                fileId = fId,
+                                                                permissionId = pId,
+                                                                onSuccess = {
+                                                                    android.widget.Toast.makeText(context, "Permission removed.", android.widget.Toast.LENGTH_SHORT).show()
+                                                                    // reload
+                                                                    isLoadingPermissions = true
+                                                                    viewModel.fetchGoogleFilePermissions(context, fId, onSuccess = {
+                                                                        permissionsList = it
+                                                                        isLoadingPermissions = false
+                                                                    }, onFailure = {
+                                                                        isLoadingPermissions = false
+                                                                    })
+                                                                },
+                                                                onFailure = { err ->
+                                                                    android.widget.Toast.makeText(context, "Removal failed: $err", android.widget.Toast.LENGTH_SHORT).show()
+                                                                }
+                                                            )
+                                                        },
+                                                        modifier = Modifier.size(24.dp)
+                                                    ) {
+                                                        Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color(0xFFEF5350), modifier = Modifier.size(16.dp))
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { activeFileForPermissions = null }) {
+                        Text("CLOSE", color = Color(0xFF29B6F6), fontWeight = FontWeight.Bold)
+                    }
+                },
+                containerColor = Color(0xFF161618),
+                shape = RoundedCornerShape(16.dp)
+            )
+        }
+
+        // ==========================================
+        // DIALOG: GOOGLE COMMENTS
+        // ==========================================
+        if (activeFileForComments != null) {
+            val fileNode = activeFileForComments!!
+            val fId = when {
+                fileNode.googleDocRef != null -> fileNode.googleDocRef.id
+                fileNode.googleSheetRef != null -> fileNode.googleSheetRef.id
+                else -> fileNode.googleDriveRef!!.id
+            }
+            AlertDialog(
+                onDismissRequest = { activeFileForComments = null },
+                title = {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.Comment, contentDescription = null, tint = Color(0xFF66BB6A), modifier = Modifier.size(22.dp))
+                        Text("Comments & Discussions", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    }
+                },
+                text = {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(fileNode.name, color = Color.Gray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        
+                        androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+                        // Add new comment Section
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            OutlinedTextField(
+                                value = newCommentText,
+                                onValueChange = { newCommentText = it },
+                                placeholder = { Text("Write a comment...", color = Color.Gray, fontSize = 12.sp) },
+                                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 12.sp),
+                                modifier = Modifier.weight(1f),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = Color(0xFF66BB6A),
+                                    unfocusedBorderColor = Color.White.copy(alpha = 0.15f)
+                                )
+                            )
+                            Button(
+                                onClick = {
+                                    if (newCommentText.isBlank()) return@Button
+                                    viewModel.addGoogleFileComment(
+                                        context = context,
+                                        fileId = fId,
+                                        content = newCommentText.trim(),
+                                        onSuccess = {
+                                            android.widget.Toast.makeText(context, "Comment added!", android.widget.Toast.LENGTH_SHORT).show()
+                                            newCommentText = ""
+                                            // reload
+                                            isLoadingComments = true
+                                            viewModel.fetchGoogleFileComments(context, fId, onSuccess = {
+                                                commentsList = it
+                                                isLoadingComments = false
+                                            }, onFailure = {
+                                                isLoadingComments = false
+                                            })
+                                        },
+                                        onFailure = { err ->
+                                            android.widget.Toast.makeText(context, "Comment failed: $err", android.widget.Toast.LENGTH_SHORT).show()
+                                        }
+                                    )
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF66BB6A)),
+                                shape = RoundedCornerShape(4.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                            ) {
+                                Text("POST", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+                            }
+                        }
+
+                        androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+                        if (isLoadingComments) {
+                            Box(modifier = Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator(color = Color(0xFF66BB6A), modifier = Modifier.size(24.dp))
+                            }
+                        } else {
+                            val arr = commentsList
+                            if (arr == null || arr.length() == 0) {
+                                Box(modifier = Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                                    Text("No comments found.", color = Color.Gray, fontSize = 12.sp)
+                                }
+                            } else {
+                                Box(modifier = Modifier.heightIn(max = 220.dp)) {
+                                    LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                        items(arr.length()) { idx ->
+                                            val c = arr.optJSONObject(idx) ?: org.json.JSONObject()
+                                            val content = c.optString("content")
+                                            val authorObj = c.optJSONObject("author")
+                                            val authorName = authorObj?.optString("displayName") ?: "Anonymous User"
+                                            val createdTime = c.optString("createdTime", "").replace("T", " ").substringBefore(".")
+                                            
+                                            Column(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .background(Color.White.copy(alpha = 0.03f), shape = RoundedCornerShape(8.dp))
+                                                    .padding(8.dp)
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Text(authorName, color = Color(0xFF81C784), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                                    Text(createdTime, color = Color.Gray, fontSize = 9.sp)
+                                                }
+                                                Spacer(modifier = Modifier.height(4.dp))
+                                                Text(content, color = Color.White, fontSize = 11.sp)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { activeFileForComments = null }) {
+                        Text("CLOSE", color = Color(0xFF66BB6A), fontWeight = FontWeight.Bold)
+                    }
+                },
+                containerColor = Color(0xFF161618),
+                shape = RoundedCornerShape(16.dp)
+            )
+        }
+
+        // ==========================================
+        // DIALOG: GOOGLE REVISIONS (HISTORY)
+        // ==========================================
+        if (activeFileForRevisions != null) {
+            val fileNode = activeFileForRevisions!!
+            val fId = when {
+                fileNode.googleDocRef != null -> fileNode.googleDocRef.id
+                fileNode.googleSheetRef != null -> fileNode.googleSheetRef.id
+                else -> fileNode.googleDriveRef!!.id
+            }
+            AlertDialog(
+                onDismissRequest = { activeFileForRevisions = null },
+                title = {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.History, contentDescription = null, tint = Color(0xFFFFCA28), modifier = Modifier.size(22.dp))
+                        Text("Version & Revision History", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                     }
                 },
                 text = {
@@ -3644,37 +4632,65 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("FILE NAME", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                        Text(fileNode.name, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        Text(fileNode.name, color = Color.Gray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         
-                        androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = 0.05f))
-                        
-                        Text("ADDED BY / CREATOR", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                        Text(addedBy, color = Color(0xFF81C784), fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        
-                        androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = 0.05f))
-                        
-                        Text("UPLOADED DATE / TIME", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                        Text(addedAt, color = Color.White, fontSize = 12.sp)
-                        
-                        androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = 0.05f))
-                        
-                        Text("SIZE", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                        Text(sizeText, color = WaterBlue, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        
-                        androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = 0.05f))
-                        
-                        Text("MIME TYPE", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                        Text(fileNode.fileMime, color = Color.LightGray, fontSize = 11.sp)
+                        androidx.compose.material3.HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+                        if (isLoadingRevisions) {
+                            Box(modifier = Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator(color = Color(0xFFFFCA28), modifier = Modifier.size(24.dp))
+                            }
+                        } else {
+                            val arr = revisionsList
+                            if (arr == null || arr.length() == 0) {
+                                Box(modifier = Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                                    Text("No previous versions detected or read access restricted.", color = Color.Gray, fontSize = 11.sp)
+                                }
+                            } else {
+                                Box(modifier = Modifier.heightIn(max = 240.dp)) {
+                                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        items(arr.length()) { idx ->
+                                            val r = arr.optJSONObject(idx) ?: org.json.JSONObject()
+                                            val rId = r.optString("id")
+                                            val modifiedTime = r.optString("modifiedTime", "").replace("T", " ").substringBefore(".")
+                                            val userObj = r.optJSONObject("lastModifyingUser")
+                                            val userName = userObj?.optString("displayName") ?: "External Contributor"
+                                            val revSize = r.optLong("size", -1L)
+                                            val sizeStr = if (revSize >= 0) {
+                                                when {
+                                                    revSize > 1024 * 1024 -> String.format("%.2f MB", revSize.toFloat() / (1024 * 1024))
+                                                    revSize > 1024 -> String.format("%.2f KB", revSize.toFloat() / 1024)
+                                                    else -> "$revSize Bytes"
+                                                }
+                                            } else {
+                                                "N/A"
+                                            }
+
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .background(Color.White.copy(alpha = 0.03f), shape = RoundedCornerShape(6.dp))
+                                                    .padding(8.dp),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Column {
+                                                    Text("Revision ID: $rId", color = Color(0xFFFFCA28), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                                    Text("Modified by: $userName", color = Color.White, fontSize = 11.sp)
+                                                    Text(modifiedTime, color = Color.Gray, fontSize = 9.sp)
+                                                }
+                                                Text(sizeStr, color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 },
                 confirmButton = {
-                    Button(
-                        onClick = { activeFileForDetails = null },
-                        colors = ButtonDefaults.buttonColors(containerColor = WaterBlue, contentColor = Color.White),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("DONE", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    TextButton(onClick = { activeFileForRevisions = null }) {
+                        Text("CLOSE", color = Color(0xFFFFCA28), fontWeight = FontWeight.Bold)
                     }
                 },
                 containerColor = Color(0xFF161618),
@@ -3708,10 +4724,34 @@ fun FileExplorerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                 confirmButton = {
                     Button(
                         onClick = {
-                            val appFile = fileNode.appFileRef
-                            if (appFile != null && renameInputName.isNotBlank()) {
-                                viewModel.renameFile(appFile, renameInputName)
-                                android.widget.Toast.makeText(context, "Renamed to \"$renameInputName\"", android.widget.Toast.LENGTH_SHORT).show()
+                            if (renameInputName.isNotBlank()) {
+                                val appFile = fileNode.appFileRef
+                                if (appFile != null) {
+                                    viewModel.renameFile(appFile, renameInputName)
+                                    android.widget.Toast.makeText(context, "Renamed to \"$renameInputName\"", android.widget.Toast.LENGTH_SHORT).show()
+                                } else if (fileNode.googleDocRef != null) {
+                                    viewModel.renameGoogleFile(context, fileNode.googleDocRef.id, renameInputName, onSuccess = {
+                                        android.widget.Toast.makeText(context, "Renamed Google Doc successfully!", android.widget.Toast.LENGTH_SHORT).show()
+                                        viewModel.fetchGoogleDocs(context)
+                                    }, onFailure = { err ->
+                                        android.widget.Toast.makeText(context, "Rename failed: $err", android.widget.Toast.LENGTH_SHORT).show()
+                                    })
+                                } else if (fileNode.googleSheetRef != null) {
+                                    viewModel.renameGoogleFile(context, fileNode.googleSheetRef.id, renameInputName, onSuccess = {
+                                        android.widget.Toast.makeText(context, "Renamed Google Sheet successfully!", android.widget.Toast.LENGTH_SHORT).show()
+                                        viewModel.fetchGoogleSheets(context)
+                                    }, onFailure = { err ->
+                                        android.widget.Toast.makeText(context, "Rename failed: $err", android.widget.Toast.LENGTH_SHORT).show()
+                                    })
+                                } else if (fileNode.googleDriveRef != null) {
+                                    viewModel.renameGoogleFile(context, fileNode.googleDriveRef.id, renameInputName, onSuccess = {
+                                        android.widget.Toast.makeText(context, "Renamed Google Drive item successfully!", android.widget.Toast.LENGTH_SHORT).show()
+                                        val currentParentId = if (driveFolderStack.isEmpty()) "root" else driveFolderStack.last().first
+                                        viewModel.fetchGoogleDriveFiles(context, currentParentId)
+                                    }, onFailure = { err ->
+                                        android.widget.Toast.makeText(context, "Rename failed: $err", android.widget.Toast.LENGTH_SHORT).show()
+                                    })
+                                }
                             }
                             fileToRename = null
                         },
@@ -3985,15 +5025,55 @@ fun getFileDetailsFromRouteMap(parentPath: String, fileName: String): Triple<Str
     return null
 }
 @Composable
-fun GoogleDocumentViewer(title: String, docUrl: String, onBack: () -> Unit) {
+fun GoogleDocumentViewer(viewModel: AppViewModel, title: String, docUrl: String, onBack: () -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     var customFullscreenView by remember { mutableStateOf<android.view.View?>(null) }
     var customViewCallbackState by remember { mutableStateOf<android.webkit.WebChromeClient.CustomViewCallback?>(null) }
     var isDesktopMode by remember { mutableStateOf(true) } // Default to desktop to prevent mobile redirect blank screens
     var isF11Mode by remember { mutableStateOf(false) }
     var webViewInstance by remember { mutableStateOf<android.webkit.WebView?>(null) }
 
-    val desktopUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-    val mobileUserAgent = "Mozilla/5.0 (Linux; Android 13; Pixel 7 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Mobile Safari/537.36"
+    LaunchedEffect(isF11Mode) {
+        viewModel.setFileExplorerF11Active(isF11Mode)
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            viewModel.setFileExplorerF11Active(false)
+        }
+    }
+
+    val desktopUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    val mobileUserAgent = "Mozilla/5.0 (Linux; Android 13; Pixel 7 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36"
+
+    val fileInfo = remember(docUrl) {
+        val docPattern = java.util.regex.Pattern.compile("/document/d/([a-zA-Z0-9-_]+)")
+        val sheetPattern = java.util.regex.Pattern.compile("/spreadsheets/d/([a-zA-Z0-9-_]+)")
+        val filePattern = java.util.regex.Pattern.compile("/file/d/([a-zA-Z0-9-_]+)")
+        val idPattern = java.util.regex.Pattern.compile("id=([a-zA-Z0-9-_]+)")
+
+        val docMatcher = docPattern.matcher(docUrl)
+        if (docMatcher.find()) {
+            Pair(docMatcher.group(1), "doc")
+        } else {
+            val sheetMatcher = sheetPattern.matcher(docUrl)
+            if (sheetMatcher.find()) {
+                Pair(sheetMatcher.group(1), "sheet")
+            } else {
+                val fileMatcher = filePattern.matcher(docUrl)
+                if (fileMatcher.find()) {
+                    Pair(fileMatcher.group(1), "drive")
+                } else {
+                    val idMatcher = idPattern.matcher(docUrl)
+                    if (idMatcher.find()) {
+                        Pair(idMatcher.group(1), "drive")
+                    } else {
+                        null
+                    }
+                }
+            }
+        }
+    }
 
     val finalUrl = remember(docUrl) {
         val ytId = when {
@@ -4041,67 +5121,105 @@ fun GoogleDocumentViewer(title: String, docUrl: String, onBack: () -> Unit) {
                 .fillMaxSize()
                 .background(Color(0xFF0F0F14))
         ) {
-            if (!isF11Mode) {
-                androidx.compose.foundation.layout.Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(56.dp)
-                        .background(Color(0xFF16161B))
-                        .padding(horizontal = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = Icons.Default.ArrowBack,
-                            contentDescription = "Back",
-                            tint = Color.White
-                        )
-                    }
-                    androidx.compose.foundation.layout.Spacer(modifier = Modifier.width(8.dp))
-                    
-                    Text(
-                        text = title,
-                        color = Color.White,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
+            // Always show the top ribbon bar in both regular and immersive F11 fullscreen modes
+            androidx.compose.foundation.layout.Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp)
+                    .background(Color(0xFF16161B))
+                    .padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        imageVector = Icons.Default.ArrowBack,
+                        contentDescription = "Back",
+                        tint = Color.White
                     )
+                }
+                androidx.compose.foundation.layout.Spacer(modifier = Modifier.width(8.dp))
+                
+                Text(
+                    text = title,
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
 
-                    // Refresh Button
-                    IconButton(onClick = { webViewInstance?.reload() }) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = "Refresh",
-                            tint = Color.White
-                        )
+                // Refresh Button
+                IconButton(onClick = { webViewInstance?.reload() }) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Refresh",
+                        tint = Color.White
+                    )
+                }
+
+                // Desktop Mode Toggle (Enables Desktop Google Docs/Sheets Editor!)
+                IconButton(onClick = {
+                    isDesktopMode = !isDesktopMode
+                    webViewInstance?.settings?.apply {
+                        userAgentString = if (isDesktopMode) desktopUserAgent else mobileUserAgent
+                        useWideViewPort = isDesktopMode
+                        loadWithOverviewMode = isDesktopMode
                     }
+                    webViewInstance?.reload()
+                }) {
+                    Icon(
+                        imageVector = if (isDesktopMode) Icons.Default.Laptop else Icons.Default.StayCurrentPortrait,
+                        contentDescription = "Toggle Desktop Editor Mode",
+                        tint = if (isDesktopMode) Color(0xFF29B6F6) else Color.White
+                    )
+                }
 
-                    // Desktop Mode Toggle (Enables Desktop Google Docs/Sheets Editor!)
-                    IconButton(onClick = {
-                        isDesktopMode = !isDesktopMode
-                        webViewInstance?.settings?.apply {
-                            userAgentString = if (isDesktopMode) desktopUserAgent else mobileUserAgent
-                            useWideViewPort = isDesktopMode
-                            loadWithOverviewMode = isDesktopMode
+                // Immersive Mode Toggle (F11 Style)
+                IconButton(onClick = { isF11Mode = !isF11Mode }) {
+                    Icon(
+                        imageVector = if (isF11Mode) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                        contentDescription = "Immersive Mode (F11)",
+                        tint = if (isF11Mode) WaterBlue else Color.White
+                    )
+                }
+
+                if (fileInfo != null) {
+                    var showDropdown by remember { mutableStateOf(false) }
+                    Box {
+                        IconButton(onClick = { showDropdown = true }) {
+                            Icon(
+                                imageVector = Icons.Default.MoreVert,
+                                contentDescription = "More Options",
+                                tint = Color.White
+                            )
                         }
-                        webViewInstance?.reload()
-                    }) {
-                        Icon(
-                            imageVector = if (isDesktopMode) Icons.Default.Laptop else Icons.Default.StayCurrentPortrait,
-                            contentDescription = "Toggle Desktop Editor Mode",
-                            tint = if (isDesktopMode) Color(0xFF29B6F6) else Color.White
-                        )
-                    }
-
-                    // Immersive Mode Toggle (F11 Style)
-                    IconButton(onClick = { isF11Mode = true }) {
-                        Icon(
-                            imageVector = Icons.Default.Fullscreen,
-                            contentDescription = "Immersive Mode (F11)",
-                            tint = Color.White
-                        )
+                        DropdownMenu(
+                            expanded = showDropdown,
+                            onDismissRequest = { showDropdown = false },
+                            modifier = Modifier.background(Color(0xFF16161B))
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Copy Link (Public Editor)", color = Color.White, fontSize = 13.sp) },
+                                onClick = {
+                                    showDropdown = false
+                                    viewModel.makeFilePublicEditorAndGetLink(
+                                        context = context,
+                                        fileId = fileInfo.first,
+                                        fileType = fileInfo.second,
+                                        onSuccess = { link ->
+                                            android.widget.Toast.makeText(context, "Public editor link copied!", android.widget.Toast.LENGTH_SHORT).show()
+                                        },
+                                        onFailure = { err ->
+                                            android.widget.Toast.makeText(context, err, android.widget.Toast.LENGTH_SHORT).show()
+                                        }
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(Icons.Default.ContentCopy, contentDescription = null, tint = Color(0xFFFFCC80), modifier = Modifier.size(16.dp))
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -4163,25 +5281,6 @@ fun GoogleDocumentViewer(title: String, docUrl: String, onBack: () -> Unit) {
                 },
                 modifier = Modifier.fillMaxSize()
             )
-        }
-
-        if (isF11Mode) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(16.dp)
-                    .clip(androidx.compose.foundation.shape.CircleShape)
-                    .background(Color.Black.copy(alpha = 0.6f))
-                    .clickable { isF11Mode = false }
-                    .padding(8.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.FullscreenExit,
-                    contentDescription = "Exit Fullscreen",
-                    tint = WaterBlue,
-                    modifier = Modifier.size(24.dp)
-                )
-            }
         }
 
         if (customFullscreenView != null) {
@@ -4710,13 +5809,13 @@ fun FileGridItemCard(
 
                     IconButton(
                         onClick = onOptionsClick,
-                        modifier = Modifier.size(24.dp)
+                        modifier = Modifier.size(36.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.MoreVert,
                             contentDescription = "Options",
                             tint = Color.LightGray,
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier.size(24.dp)
                         )
                     }
                 }
@@ -5134,13 +6233,13 @@ fun SharedLinkFolderViewerDialog(
                                 Spacer(modifier = Modifier.width(8.dp))
                                 IconButton(
                                     onClick = { onOptionsClick(mockFileNode) },
-                                    modifier = Modifier.size(28.dp)
+                                    modifier = Modifier.size(36.dp)
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.MoreVert,
                                         contentDescription = "Options",
                                         tint = Color.LightGray,
-                                        modifier = Modifier.size(16.dp)
+                                        modifier = Modifier.size(24.dp)
                                     )
                                 }
                             }

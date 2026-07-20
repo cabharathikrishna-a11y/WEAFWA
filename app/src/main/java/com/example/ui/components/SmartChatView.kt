@@ -282,7 +282,10 @@ fun SmartChatView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
         ) {
             TextField(
                 value = inputMessage,
-                onValueChange = { inputMessage = it },
+                onValueChange = {
+                    inputMessage = it
+                    viewModel.detectAndRecognizeUrlInText(it)
+                },
                 placeholder = { Text("Chat with local offline Gemma or enter commands...", color = Color.Gray, fontSize = 13.sp) },
                 singleLine = true,
                 colors = TextFieldDefaults.colors(

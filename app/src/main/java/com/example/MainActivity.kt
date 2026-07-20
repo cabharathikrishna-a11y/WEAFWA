@@ -602,6 +602,7 @@ class MainActivity : ComponentActivity() {
                     val tabOrder by viewModel.tabOrder.collectAsStateWithLifecycle()
                     val hiddenTabs by viewModel.hiddenTabs.collectAsStateWithLifecycle()
                     val isTimerImmersive by viewModel.isTimerImmersive.collectAsStateWithLifecycle()
+                    val isFileExplorerF11Active by viewModel.isFileExplorerF11Active.collectAsStateWithLifecycle()
                     val tabBarOrientation by viewModel.tabBarOrientation.collectAsStateWithLifecycle()
                     val showHistoryScreen by viewModel.showHistoryScreen.collectAsStateWithLifecycle()
                     val navItems = getNavigationItems(tabOrder.filterNot { hiddenTabs.contains(it) })
@@ -772,7 +773,7 @@ class MainActivity : ComponentActivity() {
                         }
                         if (alignMode == "horizontal" || alignMode == "top") {
                         Column(modifier = outerModifier) {
-                            if (!isKeyboardVisible && currentScreen != Screen.LOGIN && currentScreen != Screen.PROFILE_SETUP && currentScreen != Screen.PERMISSION_ONBOARDING && currentScreen != Screen.CALENDAR_OPTIMIZATION_ONBOARDING) {
+                            if (!isKeyboardVisible && !isFileExplorerF11Active && currentScreen != Screen.LOGIN && currentScreen != Screen.PROFILE_SETUP && currentScreen != Screen.PERMISSION_ONBOARDING && currentScreen != Screen.CALENDAR_OPTIMIZATION_ONBOARDING) {
                                 // Top Horizontal pill-tab navigation bar (Floating Glass Dock)
                                 Box(
                                     modifier = Modifier
@@ -854,7 +855,7 @@ class MainActivity : ComponentActivity() {
                         Column(modifier = outerModifier) {
                             MainScaffoldContent(scaffoldModifier = Modifier.weight(1f).fillMaxWidth())
 
-                            if (!isKeyboardVisible && currentScreen != Screen.LOGIN && currentScreen != Screen.PROFILE_SETUP && currentScreen != Screen.PERMISSION_ONBOARDING && currentScreen != Screen.CALENDAR_OPTIMIZATION_ONBOARDING) {
+                            if (!isKeyboardVisible && !isFileExplorerF11Active && currentScreen != Screen.LOGIN && currentScreen != Screen.PROFILE_SETUP && currentScreen != Screen.PERMISSION_ONBOARDING && currentScreen != Screen.CALENDAR_OPTIMIZATION_ONBOARDING) {
                                 // Bottom Horizontal pill-tab navigation bar (Floating Glass Dock)
                                 Box(
                                     modifier = Modifier
@@ -1020,7 +1021,7 @@ class MainActivity : ComponentActivity() {
                         }
                     } else { // "left" or "vertical" or any other fallback
                         Row(modifier = outerModifier) {
-                            if (!isKeyboardVisible && currentScreen != Screen.LOGIN && currentScreen != Screen.PROFILE_SETUP && currentScreen != Screen.PERMISSION_ONBOARDING && currentScreen != Screen.CALENDAR_OPTIMIZATION_ONBOARDING) {
+                            if (!isKeyboardVisible && !isFileExplorerF11Active && currentScreen != Screen.LOGIN && currentScreen != Screen.PROFILE_SETUP && currentScreen != Screen.PERMISSION_ONBOARDING && currentScreen != Screen.CALENDAR_OPTIMIZATION_ONBOARDING) {
                             // Left-hand vertical tabs column (Floating Glass Rail)
                             Box(
                                 modifier = Modifier
@@ -1889,7 +1890,22 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        return super.dispatchKeyEvent(event)
+        val handled = super.dispatchKeyEvent(event)
+        if (handled) return true
+
+        if (event.action == android.view.KeyEvent.ACTION_DOWN) {
+            if (viewModel.currentScreen.value == Screen.TIMER) {
+                if (event.keyCode == android.view.KeyEvent.KEYCODE_F || event.keyCode == android.view.KeyEvent.KEYCODE_F11) {
+                    viewModel.setTimerImmersive(true)
+                    return true
+                } else if (event.keyCode == android.view.KeyEvent.KEYCODE_ESCAPE) {
+                    viewModel.setTimerImmersive(false)
+                    return true
+                }
+            }
+        }
+
+        return false
     }
 
     override fun onDestroy() {
@@ -1916,28 +1932,8 @@ fun PastedLinksHubView(viewModel: AppViewModel) {
     var editingLink by remember { mutableStateOf<com.example.ui.PastedLinkItem?>(null) }
     var renameText by remember { mutableStateOf("") }
     
-    // Read clipboard
+    // Read clipboard (Disabled: URL recognition must happen only if typed inside the app, no top suggestion banner)
     var clipboardUrl by remember { mutableStateOf<String?>(null) }
-    
-    // Check clipboard on app start or periodically
-    LaunchedEffect(pastedLinks) {
-        try {
-            val text = clipboardManager.getText()?.text?.trim() ?: ""
-            if ((text.startsWith("http://", ignoreCase = true) || text.startsWith("https://", ignoreCase = true)) && text.length < 2000) {
-                // Only suggest if not already added
-                val isAlreadyAdded = pastedLinks.any { it.url.equals(text, ignoreCase = true) }
-                if (!isAlreadyAdded) {
-                    clipboardUrl = text
-                } else {
-                    clipboardUrl = null
-                }
-            } else {
-                clipboardUrl = null
-            }
-        } catch (e: Exception) {
-            // Ignore clipboard errors
-        }
-    }
 
     Column(
         modifier = Modifier

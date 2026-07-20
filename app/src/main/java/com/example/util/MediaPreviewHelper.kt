@@ -263,7 +263,7 @@ fun MediaPreviewBox(
                         }
                     }
                     else -> {
-                        if (cleanPath.endsWith(".pdf", ignoreCase = true)) {
+                        if (cleanPath.endsWith(".pdf", ignoreCase = true) || cleanPath.contains(".pdf", ignoreCase = true) || pathOrName.contains(".pdf", ignoreCase = true)) {
                             showPdfViewer = true
                         } else {
                             // Try opening with standard android system intent

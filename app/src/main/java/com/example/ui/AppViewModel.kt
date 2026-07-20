@@ -3,6 +3,8 @@ package com.example.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import android.util.Log
 import com.example.api.FirebaseConfig
 import com.example.api.DevicePresenceManager
@@ -1140,6 +1142,14 @@ class AppViewModel(
 
     fun setTimerImmersive(immersive: Boolean) {
         _isTimerImmersive.value = immersive
+    }
+
+    // Immersive File Explorer toggle (F11 Fullscreen)
+    private val _isFileExplorerF11Active = MutableStateFlow(false)
+    val isFileExplorerF11Active: StateFlow<Boolean> = _isFileExplorerF11Active.asStateFlow()
+
+    fun setFileExplorerF11Active(active: Boolean) {
+        _isFileExplorerF11Active.value = active
     }
 
     // Fullscreen Timer Display Mode: "digital" or "flip"
@@ -5373,79 +5383,27 @@ class AppViewModel(
                 // Ignore if not takeable or not persistable
             }
 
-            var finalUriString = uriString
             val context = getApplication<android.app.Application>().applicationContext
-
             val isContentUri = uriString.startsWith("content://")
             val isFilePath = uriString.startsWith("/") && mimeType != "inode/directory" && uriString != "local_virtual_directory"
 
-            if (isContentUri || isFilePath) {
-                var fileObj: java.io.File? = null
-                try {
-                    if (isContentUri) {
-                        val contentUri = android.net.Uri.parse(uriString)
-                        val tempFile = java.io.File(context.cacheDir, name.ifEmpty { "temp_upload_${System.currentTimeMillis()}" })
-                        context.contentResolver.openInputStream(contentUri)?.use { input ->
-                            tempFile.outputStream().use { output ->
-                                input.copyTo(output)
-                            }
-                        }
-                        fileObj = tempFile
-                    } else if (isFilePath) {
-                        fileObj = java.io.File(uriString)
-                    }
-
-                    if (fileObj != null && fileObj.exists() && fileObj.isFile) {
-                        val token = com.example.util.GoogleDriveSyncManager.getAccessToken(context)
-                        if (token != null) {
-                            val sharingUrl = com.example.util.GoogleDriveSyncManager.uploadPublicMediaFileDirect(context, token, fileObj)
-                            if (sharingUrl != null) {
-                                finalUriString = sharingUrl
-                            } else {
-                                com.example.util.GoogleDriveSyncManager.sendNotification(
-                                    context,
-                                    "Upload Failed",
-                                    "Upload failed for file $name. Please paste the link by uploading manually into Drive."
-                                )
-                            }
-                        } else {
-                            com.example.util.GoogleDriveSyncManager.sendNotification(
-                                context,
-                                    "Upload Failed",
-                                    "Upload failed: Google Drive authorization is missing. Please paste the link by uploading manually into Drive."
-                            )
-                        }
-                    }
-                } catch (e: Exception) {
-                    android.util.Log.e("FirebaseSync", "Failed to upload file to Google Drive", e)
-                    com.example.util.GoogleDriveSyncManager.sendNotification(
-                        context,
-                        "Upload Failed",
-                        "Upload failed: ${e.localizedMessage}. Please paste the link by uploading manually into Drive."
-                    )
-                } finally {
-                    if (isContentUri && fileObj != null && fileObj.exists()) {
-                        fileObj.delete()
-                    }
-                }
-            }
-
-            if (mimeType == "application/vnd.google-apps.folder-link") {
-                syncSharedFolderContentsInBackground(context, name, uriString)
-            }
-
+            // 1. IMMEDIATELY INSERT INTO LOCAL DATABASE
             val appFile = AppFile(
                 name = name,
                 path = path,
                 size = size,
                 mimeType = mimeType,
-                uriString = finalUriString
+                uriString = uriString
             )
             val rowId = repository.insertFile(appFile)
             val insertedFile = appFile.copy(id = rowId.toInt())
 
-            // Write metadata JSON to RTDB
-            viewModelScope.launch(Dispatchers.IO) {
+            if (mimeType == "application/vnd.google-apps.folder-link") {
+                syncSharedFolderContentsInBackground(context, name, uriString)
+            }
+
+            // Define the helper to save metadata to RTDB
+            val writeMetadataToRtdb = { fileToWrite: AppFile ->
                 try {
                     val dbUrl = "https://lifeosca-default-rtdb.asia-southeast1.firebasedatabase.app/"
                     val database = com.google.firebase.database.FirebaseDatabase.getInstance(dbUrl)
@@ -5454,18 +5412,108 @@ class AppViewModel(
                     val fileId = java.util.UUID.randomUUID().toString().replace("-", "")
 
                     val fileMap = mapOf(
-                        "name" to insertedFile.name,
-                        "path" to insertedFile.path,
-                        "size" to insertedFile.size,
-                        "mimeType" to insertedFile.mimeType,
-                        "uriString" to insertedFile.uriString,
-                        "timestamp" to insertedFile.timestamp,
-                        "isFavorite" to insertedFile.isFavorite
+                        "name" to fileToWrite.name,
+                        "path" to fileToWrite.path,
+                        "size" to fileToWrite.size,
+                        "mimeType" to fileToWrite.mimeType,
+                        "uriString" to fileToWrite.uriString,
+                        "timestamp" to fileToWrite.timestamp,
+                        "isFavorite" to fileToWrite.isFavorite
                     )
                     folderRef.child(fileId).setValue(fileMap)
                     android.util.Log.i("FirebaseSync", "Successfully saved file metadata to RTDB: files/$cleanPath/$fileId")
                 } catch (e: Exception) {
                     android.util.Log.e("FirebaseSync", "Failed to write file metadata to RTDB", e)
+                }
+            }
+
+            // 2. LAUNCH BACKGROUND UPLOAD WITH A TIMEOUT
+            if (isContentUri || isFilePath) {
+                viewModelScope.launch(Dispatchers.IO) {
+                    var finalUriString = uriString
+                    var isTimeoutOccurred = false
+                    val fileObj = try {
+                        kotlinx.coroutines.withTimeout(20000L) { // 20-second timeout
+                            var currentFile: java.io.File? = null
+                            if (isContentUri) {
+                                val contentUri = android.net.Uri.parse(uriString)
+                                val tempFile = java.io.File(context.cacheDir, name.ifEmpty { "temp_upload_${System.currentTimeMillis()}" })
+                                context.contentResolver.openInputStream(contentUri)?.use { input ->
+                                    tempFile.outputStream().use { output ->
+                                        input.copyTo(output)
+                                    }
+                                }
+                                currentFile = tempFile
+                            } else if (isFilePath) {
+                                currentFile = java.io.File(uriString)
+                            }
+
+                            if (currentFile != null && currentFile.exists() && currentFile.isFile) {
+                                val token = com.example.util.GoogleDriveSyncManager.getAccessToken(context)
+                                if (token != null) {
+                                    val sharingUrl = com.example.util.GoogleDriveSyncManager.uploadPublicMediaFileDirect(context, token, currentFile)
+                                    if (sharingUrl != null) {
+                                        finalUriString = sharingUrl
+                                        
+                                        // Update local DB with Drive URL
+                                        val updatedFile = insertedFile.copy(uriString = finalUriString)
+                                        repository.insertFile(updatedFile)
+                                    } else {
+                                        com.example.util.GoogleDriveSyncManager.sendNotification(
+                                            context,
+                                            "Upload Failed",
+                                            "Upload failed for file $name. Please paste the link by uploading manually into Drive."
+                                        )
+                                    }
+                                } else {
+                                    com.example.util.GoogleDriveSyncManager.sendNotification(
+                                        context,
+                                        "Upload Failed",
+                                        "Upload failed: Google Drive authorization is missing. Please paste the link by uploading manually into Drive."
+                                    )
+                                }
+                            }
+                            currentFile
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("FirebaseSync", "Failed to upload file to Google Drive", e)
+                        if (e is kotlinx.coroutines.TimeoutCancellationException) {
+                            isTimeoutOccurred = true
+                        }
+                        val errorMsg = if (e is kotlinx.coroutines.TimeoutCancellationException) {
+                            "Upload timed out after 20s. Please check your connection."
+                        } else {
+                            e.localizedMessage ?: "Unknown error"
+                        }
+                        com.example.util.GoogleDriveSyncManager.sendNotification(
+                            context,
+                            "Upload Failed",
+                            "Upload failed: $errorMsg"
+                        )
+                        
+                        // Fallback: If it's a content Uri and we copied it, try to return it so it gets deleted in finally
+                        if (isContentUri) {
+                            java.io.File(context.cacheDir, name.ifEmpty { "temp_upload_${System.currentTimeMillis()}" }).takeIf { it.exists() }
+                        } else {
+                            null
+                        }
+                    }
+
+                    try {
+                        if (isContentUri && fileObj != null && fileObj.exists()) {
+                            fileObj.delete()
+                        }
+                    } catch (ex: Exception) {
+                        android.util.Log.e("FirebaseSync", "Error deleting temp file", ex)
+                    } finally {
+                        // Always save the latest state (with sharingUrl if succeeded, or original local path if failed) to Firebase RTDB
+                        writeMetadataToRtdb(insertedFile.copy(uriString = finalUriString))
+                    }
+                }
+            } else {
+                // Not a physical file upload, just write local metadata to RTDB
+                viewModelScope.launch(Dispatchers.IO) {
+                    writeMetadataToRtdb(insertedFile)
                 }
             }
         }
@@ -8148,6 +8196,676 @@ class AppViewModel(
         val updated = _pastedLinks.value.filter { it.id != id }
         _pastedLinks.value = updated
         savePastedLinks(updated)
+    }
+
+    fun detectAndRecognizeUrlInText(text: String) {
+        val words = text.split(Regex("\\s+"))
+        for (word in words) {
+            val trimmed = word.trim().removeSuffix(".")
+            if ((trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)) && trimmed.length < 2000) {
+                addRecognizedLink(trimmed)
+            }
+        }
+    }
+
+    fun renameGoogleFile(
+        context: android.content.Context,
+        fileId: String,
+        newName: String,
+        onSuccess: () -> Unit = {},
+        onFailure: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            try {
+                val token = com.example.util.GoogleDriveSyncManager.getAccessToken(context)
+                if (token == null) {
+                    onFailure("Google Account connection required.")
+                    return@launch
+                }
+                val url = "https://www.googleapis.com/drive/v3/files/$fileId"
+                val body = org.json.JSONObject().apply {
+                    put("name", newName)
+                }
+                val mediaType = "application/json; charset=utf-8".toMediaType()
+                val requestBody = body.toString().toRequestBody(mediaType)
+                val request = okhttp3.Request.Builder()
+                    .url(url)
+                    .addHeader("Authorization", "Bearer $token")
+                    .addHeader("Content-Type", "application/json")
+                    .patch(requestBody)
+                    .build()
+                val client = okhttp3.OkHttpClient()
+                val success = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    client.newCall(request).execute().use { response ->
+                        response.isSuccessful
+                    }
+                }
+                if (success) {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onSuccess()
+                    }
+                } else {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onFailure("Failed to rename file on Google Drive.")
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onFailure("Rename failed: ${e.localizedMessage}")
+                }
+            }
+        }
+    }
+
+    fun makeFilePublicEditorAndGetLink(
+        context: android.content.Context,
+        fileId: String,
+        fileType: String, // "doc", "sheet", or "drive"
+        onSuccess: (String) -> Unit = {},
+        onFailure: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            try {
+                val token = com.example.util.GoogleDriveSyncManager.getAccessToken(context)
+                if (token == null) {
+                    onFailure("Google Account connection required.")
+                    return@launch
+                }
+                
+                // 1. Make the file public and editor
+                withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    com.example.util.GoogleDriveSyncManager.makeFilePublicAndEditor(token, fileId)
+                }
+
+                // 2. Generate the public editor link
+                val publicLink = when (fileType) {
+                    "doc" -> "https://docs.google.com/document/d/$fileId/edit"
+                    "sheet" -> "https://docs.google.com/spreadsheets/d/$fileId/edit"
+                    else -> "https://drive.google.com/file/d/$fileId/view?usp=sharing"
+                }
+
+                // 3. Copy link to clipboard
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    val clip = android.content.ClipData.newPlainText("Google Public Editor Link", publicLink)
+                    clipboard.setPrimaryClip(clip)
+                    onSuccess(publicLink)
+                }
+            } catch (e: Exception) {
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onFailure("Failed to make public and copy link: ${e.localizedMessage}")
+                }
+            }
+        }
+    }
+
+    fun deleteGoogleFile(
+        context: android.content.Context,
+        fileId: String,
+        onSuccess: () -> Unit = {},
+        onFailure: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            try {
+                val token = com.example.util.GoogleDriveSyncManager.getAccessToken(context)
+                if (token == null) {
+                    onFailure("Google Account connection required.")
+                    return@launch
+                }
+                val url = "https://www.googleapis.com/drive/v3/files/$fileId"
+                val request = okhttp3.Request.Builder()
+                    .url(url)
+                    .addHeader("Authorization", "Bearer $token")
+                    .delete()
+                    .build()
+                val client = okhttp3.OkHttpClient()
+                val success = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    client.newCall(request).execute().use { response ->
+                        response.code == 204 || response.isSuccessful
+                    }
+                }
+                if (success) {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onSuccess()
+                    }
+                } else {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onFailure("Failed to delete file on Google Drive.")
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onFailure("Delete failed: ${e.localizedMessage}")
+                }
+            }
+        }
+    }
+
+    fun downloadGoogleFileContent(
+        context: android.content.Context,
+        fileId: String,
+        name: String,
+        mimeType: String,
+        onSuccess: () -> Unit = {},
+        onFailure: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            try {
+                val token = com.example.util.GoogleDriveSyncManager.getAccessToken(context)
+                if (token == null) {
+                    onFailure("Google Account connection required.")
+                    return@launch
+                }
+                
+                val url = if (mimeType == "application/vnd.google-apps.document") {
+                    "https://www.googleapis.com/drive/v3/files/$fileId/export?mimeType=application/pdf"
+                } else if (mimeType == "application/vnd.google-apps.spreadsheet") {
+                    "https://www.googleapis.com/drive/v3/files/$fileId/export?mimeType=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                } else {
+                    "https://www.googleapis.com/drive/v3/files/$fileId?alt=media"
+                }
+                
+                val targetName = if (mimeType == "application/vnd.google-apps.document") {
+                    if (name.endsWith(".pdf", ignoreCase = true)) name else "$name.pdf"
+                } else if (mimeType == "application/vnd.google-apps.spreadsheet") {
+                    if (name.endsWith(".xlsx", ignoreCase = true)) name else "$name.xlsx"
+                } else {
+                    name
+                }
+                
+                val targetMime = if (mimeType == "application/vnd.google-apps.document") {
+                    "application/pdf"
+                } else if (mimeType == "application/vnd.google-apps.spreadsheet") {
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                } else {
+                    mimeType
+                }
+
+                val request = okhttp3.Request.Builder()
+                    .url(url)
+                    .addHeader("Authorization", "Bearer $token")
+                    .get()
+                    .build()
+
+                val client = okhttp3.OkHttpClient()
+                withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    client.newCall(request).execute().use { response ->
+                        if (!response.isSuccessful) {
+                            withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                onFailure("Download failed from Google Drive: code=${response.code}")
+                            }
+                            return@withContext
+                        }
+                        val bytes = response.body?.bytes()
+                        if (bytes != null) {
+                            withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                com.example.ui.components.downloadFileToDevice(context, targetName, targetMime, bytes)
+                                onSuccess()
+                            }
+                        } else {
+                            withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                onFailure("Empty response body.")
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onFailure("Download failed: ${e.localizedMessage}")
+                }
+            }
+        }
+    }
+
+    fun copyGoogleFile(
+        context: android.content.Context,
+        fileId: String,
+        copyName: String,
+        onSuccess: (String) -> Unit = {},
+        onFailure: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            try {
+                val token = com.example.util.GoogleDriveSyncManager.getAccessToken(context)
+                if (token == null) {
+                    onFailure("Google Account connection required.")
+                    return@launch
+                }
+                val url = "https://www.googleapis.com/drive/v3/files/$fileId/copy"
+                val bodyJson = org.json.JSONObject().apply {
+                    put("name", copyName)
+                }
+                val mediaType = "application/json; charset=utf-8".toMediaType()
+                val requestBody = bodyJson.toString().toRequestBody(mediaType)
+                val request = okhttp3.Request.Builder()
+                    .url(url)
+                    .addHeader("Authorization", "Bearer $token")
+                    .addHeader("Content-Type", "application/json")
+                    .post(requestBody)
+                    .build()
+                val client = okhttp3.OkHttpClient()
+                var newFileId: String? = null
+                val success = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    client.newCall(request).execute().use { response ->
+                        if (response.isSuccessful) {
+                            val respStr = response.body?.string() ?: ""
+                            val respJson = org.json.JSONObject(respStr)
+                            newFileId = respJson.optString("id")
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
+                if (success && newFileId != null) {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onSuccess(newFileId!!)
+                    }
+                } else {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onFailure("Failed to copy file on Google Drive.")
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onFailure("Copy failed: ${e.localizedMessage}")
+                }
+            }
+        }
+    }
+
+    fun fetchGoogleFileDetails(
+        context: android.content.Context,
+        fileId: String,
+        onSuccess: (org.json.JSONObject) -> Unit = {},
+        onFailure: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            try {
+                val token = com.example.util.GoogleDriveSyncManager.getAccessToken(context)
+                if (token == null) {
+                    onFailure("Google Account connection required.")
+                    return@launch
+                }
+                val url = "https://www.googleapis.com/drive/v3/files/$fileId?fields=id,name,mimeType,description,size,createdTime,modifiedTime,owners(displayName,emailAddress,photoLink),webViewLink,shared,permissions,version,labels"
+                val request = okhttp3.Request.Builder()
+                    .url(url)
+                    .addHeader("Authorization", "Bearer $token")
+                    .get()
+                    .build()
+                val client = okhttp3.OkHttpClient()
+                var detailsJson: org.json.JSONObject? = null
+                val success = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    client.newCall(request).execute().use { response ->
+                        if (response.isSuccessful) {
+                            val respStr = response.body?.string() ?: ""
+                            detailsJson = org.json.JSONObject(respStr)
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
+                if (success && detailsJson != null) {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onSuccess(detailsJson!!)
+                    }
+                } else {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onFailure("Failed to fetch file details.")
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onFailure("Fetch details failed: ${e.localizedMessage}")
+                }
+            }
+        }
+    }
+
+    fun fetchGoogleFilePermissions(
+        context: android.content.Context,
+        fileId: String,
+        onSuccess: (org.json.JSONArray) -> Unit = {},
+        onFailure: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            try {
+                val token = com.example.util.GoogleDriveSyncManager.getAccessToken(context)
+                if (token == null) {
+                    onFailure("Google Account connection required.")
+                    return@launch
+                }
+                val url = "https://www.googleapis.com/drive/v3/files/$fileId/permissions?fields=permissions(id,displayName,role,type,emailAddress)"
+                val request = okhttp3.Request.Builder()
+                    .url(url)
+                    .addHeader("Authorization", "Bearer $token")
+                    .get()
+                    .build()
+                val client = okhttp3.OkHttpClient()
+                var permissionsArray: org.json.JSONArray? = null
+                val success = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    client.newCall(request).execute().use { response ->
+                        if (response.isSuccessful) {
+                            val respStr = response.body?.string() ?: ""
+                            val respJson = org.json.JSONObject(respStr)
+                            permissionsArray = respJson.optJSONArray("permissions")
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
+                if (success) {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onSuccess(permissionsArray ?: org.json.JSONArray())
+                    }
+                } else {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onFailure("Failed to fetch file permissions.")
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onFailure("Fetch permissions failed: ${e.localizedMessage}")
+                }
+            }
+        }
+    }
+
+    fun addGoogleFilePermission(
+        context: android.content.Context,
+        fileId: String,
+        email: String,
+        role: String, // "reader", "commenter", "writer"
+        type: String, // "user", "group", "domain", "anyone"
+        onSuccess: () -> Unit = {},
+        onFailure: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            try {
+                val token = com.example.util.GoogleDriveSyncManager.getAccessToken(context)
+                if (token == null) {
+                    onFailure("Google Account connection required.")
+                    return@launch
+                }
+                val url = "https://www.googleapis.com/drive/v3/files/$fileId/permissions"
+                val bodyJson = org.json.JSONObject().apply {
+                    put("role", role)
+                    put("type", type)
+                    if (email.isNotEmpty()) {
+                        put("emailAddress", email)
+                    }
+                }
+                val mediaType = "application/json; charset=utf-8".toMediaType()
+                val requestBody = bodyJson.toString().toRequestBody(mediaType)
+                val request = okhttp3.Request.Builder()
+                    .url(url)
+                    .addHeader("Authorization", "Bearer $token")
+                    .addHeader("Content-Type", "application/json")
+                    .post(requestBody)
+                    .build()
+                val client = okhttp3.OkHttpClient()
+                val success = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    client.newCall(request).execute().use { response ->
+                        response.isSuccessful
+                    }
+                }
+                if (success) {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onSuccess()
+                    }
+                } else {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onFailure("Failed to add permission.")
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onFailure("Add permission failed: ${e.localizedMessage}")
+                }
+            }
+        }
+    }
+
+    fun deleteGoogleFilePermission(
+        context: android.content.Context,
+        fileId: String,
+        permissionId: String,
+        onSuccess: () -> Unit = {},
+        onFailure: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            try {
+                val token = com.example.util.GoogleDriveSyncManager.getAccessToken(context)
+                if (token == null) {
+                    onFailure("Google Account connection required.")
+                    return@launch
+                }
+                val url = "https://www.googleapis.com/drive/v3/files/$fileId/permissions/$permissionId"
+                val request = okhttp3.Request.Builder()
+                    .url(url)
+                    .addHeader("Authorization", "Bearer $token")
+                    .delete()
+                    .build()
+                val client = okhttp3.OkHttpClient()
+                val success = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    client.newCall(request).execute().use { response ->
+                        response.code == 204 || response.isSuccessful
+                    }
+                }
+                if (success) {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onSuccess()
+                    }
+                } else {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onFailure("Failed to delete permission.")
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onFailure("Delete permission failed: ${e.localizedMessage}")
+                }
+            }
+        }
+    }
+
+    fun fetchGoogleFileComments(
+        context: android.content.Context,
+        fileId: String,
+        onSuccess: (org.json.JSONArray) -> Unit = {},
+        onFailure: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            try {
+                val token = com.example.util.GoogleDriveSyncManager.getAccessToken(context)
+                if (token == null) {
+                    onFailure("Google Account connection required.")
+                    return@launch
+                }
+                val url = "https://www.googleapis.com/drive/v3/files/$fileId/comments?fields=comments(id,content,createdTime,author(displayName,photoLink),replies)"
+                val request = okhttp3.Request.Builder()
+                    .url(url)
+                    .addHeader("Authorization", "Bearer $token")
+                    .get()
+                    .build()
+                val client = okhttp3.OkHttpClient()
+                var commentsArray: org.json.JSONArray? = null
+                val success = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    client.newCall(request).execute().use { response ->
+                        if (response.isSuccessful) {
+                            val respStr = response.body?.string() ?: ""
+                            val respJson = org.json.JSONObject(respStr)
+                            commentsArray = respJson.optJSONArray("comments")
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
+                if (success) {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onSuccess(commentsArray ?: org.json.JSONArray())
+                    }
+                } else {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onFailure("Failed to fetch file comments.")
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onFailure("Fetch comments failed: ${e.localizedMessage}")
+                }
+            }
+        }
+    }
+
+    fun addGoogleFileComment(
+        context: android.content.Context,
+        fileId: String,
+        content: String,
+        onSuccess: () -> Unit = {},
+        onFailure: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            try {
+                val token = com.example.util.GoogleDriveSyncManager.getAccessToken(context)
+                if (token == null) {
+                    onFailure("Google Account connection required.")
+                    return@launch
+                }
+                val url = "https://www.googleapis.com/drive/v3/files/$fileId/comments"
+                val bodyJson = org.json.JSONObject().apply {
+                    put("content", content)
+                }
+                val mediaType = "application/json; charset=utf-8".toMediaType()
+                val requestBody = bodyJson.toString().toRequestBody(mediaType)
+                val request = okhttp3.Request.Builder()
+                    .url(url)
+                    .addHeader("Authorization", "Bearer $token")
+                    .addHeader("Content-Type", "application/json")
+                    .post(requestBody)
+                    .build()
+                val client = okhttp3.OkHttpClient()
+                val success = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    client.newCall(request).execute().use { response ->
+                        response.isSuccessful
+                    }
+                }
+                if (success) {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onSuccess()
+                    }
+                } else {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onFailure("Failed to add comment.")
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onFailure("Add comment failed: ${e.localizedMessage}")
+                }
+            }
+        }
+    }
+
+    fun fetchGoogleFileRevisions(
+        context: android.content.Context,
+        fileId: String,
+        onSuccess: (org.json.JSONArray) -> Unit = {},
+        onFailure: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            try {
+                val token = com.example.util.GoogleDriveSyncManager.getAccessToken(context)
+                if (token == null) {
+                    onFailure("Google Account connection required.")
+                    return@launch
+                }
+                val url = "https://www.googleapis.com/drive/v3/files/$fileId/revisions?fields=revisions(id,modifiedTime,lastModifyingUser(displayName,emailAddress,photoLink),size)"
+                val request = okhttp3.Request.Builder()
+                    .url(url)
+                    .addHeader("Authorization", "Bearer $token")
+                    .get()
+                    .build()
+                val client = okhttp3.OkHttpClient()
+                var revisionsArray: org.json.JSONArray? = null
+                val success = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    client.newCall(request).execute().use { response ->
+                        if (response.isSuccessful) {
+                            val respStr = response.body?.string() ?: ""
+                            val respJson = org.json.JSONObject(respStr)
+                            revisionsArray = respJson.optJSONArray("revisions")
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
+                if (success) {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onSuccess(revisionsArray ?: org.json.JSONArray())
+                    }
+                } else {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onFailure("Failed to fetch file revisions.")
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onFailure("Fetch revisions failed: ${e.localizedMessage}")
+                }
+            }
+        }
+    }
+
+    fun fetchGoogleDriveAbout(
+        context: android.content.Context,
+        onSuccess: (org.json.JSONObject) -> Unit = {},
+        onFailure: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            try {
+                val token = com.example.util.GoogleDriveSyncManager.getAccessToken(context)
+                if (token == null) {
+                    onFailure("Google Account connection required.")
+                    return@launch
+                }
+                val url = "https://www.googleapis.com/drive/v3/about?fields=user(displayName,emailAddress,photoLink),storageQuota(limit,usage,usageInDrive,usageInDriveTrash)"
+                val request = okhttp3.Request.Builder()
+                    .url(url)
+                    .addHeader("Authorization", "Bearer $token")
+                    .get()
+                    .build()
+                val client = okhttp3.OkHttpClient()
+                var aboutJson: org.json.JSONObject? = null
+                val success = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    client.newCall(request).execute().use { response ->
+                        if (response.isSuccessful) {
+                            val respStr = response.body?.string() ?: ""
+                            aboutJson = org.json.JSONObject(respStr)
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
+                if (success && aboutJson != null) {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onSuccess(aboutJson!!)
+                    }
+                } else {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onFailure("Failed to fetch about info.")
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onFailure("Fetch about info failed: ${e.localizedMessage}")
+                }
+            }
+        }
     }
 }
 

@@ -113,7 +113,14 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CalendarToday
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.HourglassEmpty
-
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.foundation.focusable
 
 
 @Composable
@@ -414,261 +421,304 @@ fun TimerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
         prevIsFocusPhaseMain = isFocusPhase
     }
 
-    if (isImmersive) {
-        TimerImmersiveContent(
-            viewModel = viewModel,
-            focusTimerDurationMins = focusTimerDurationMins,
-            onShowFriendsDetails = { viewModel.navigateTo(Screen.LIVE_SPHERE) },
-            modifier = Modifier.oledPixelShift(isTimerActiveNow)
-        )
-    } else {
-        Column(
-            modifier = modifier
-                .fillMaxSize()
-                .oledPixelShift(isTimerActiveNow)
-                .background(Color.Black)
-                .padding(if (isTablet) 16.dp else 4.dp)
-        ) {
-            val sduiPrefs = com.example.api.RemoteConfigManager.sduiPreferences.collectAsState().value
-            if (sduiPrefs.motivationalBannerText.isNotEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 6.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
-                        .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Info,
-                            contentDescription = "Motivational Banner Icon",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = sduiPrefs.motivationalBannerText,
-                            color = MaterialTheme.colorScheme.onBackground,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            textAlign = TextAlign.Center
-                        )
+    val focusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(300)
+        try {
+            focusRequester.requestFocus()
+        } catch (_: Exception) {}
+    }
+
+    LaunchedEffect(isImmersive) {
+        kotlinx.coroutines.delay(100)
+        try {
+            focusRequester.requestFocus()
+        } catch (_: Exception) {}
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .focusRequester(focusRequester)
+            .focusable()
+            .onPreviewKeyEvent { keyEvent ->
+                if (keyEvent.type == androidx.compose.ui.input.key.KeyEventType.KeyDown) {
+                    when (keyEvent.key) {
+                        androidx.compose.ui.input.key.Key.F, androidx.compose.ui.input.key.Key.F11 -> {
+                            viewModel.setTimerImmersive(!isImmersive)
+                            true
+                        }
+                        androidx.compose.ui.input.key.Key.Escape -> {
+                            viewModel.setTimerImmersive(false)
+                            true
+                        }
+                        else -> false
                     }
+                } else false
+            }
+            .pointerInput(Unit) {
+                detectTapGestures {
+                    try { focusRequester.requestFocus() } catch (_: Exception) {}
                 }
             }
-
-            // Header Top Bar Row
-            Row(
+    ) {
+        if (isImmersive) {
+            TimerImmersiveContent(
+                viewModel = viewModel,
+                focusTimerDurationMins = focusTimerDurationMins,
+                onShowFriendsDetails = { viewModel.navigateTo(Screen.LIVE_SPHERE) },
+                modifier = Modifier.oledPixelShift(isTimerActiveNow)
+            )
+        } else {
+            Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                    .fillMaxSize()
+                    .oledPixelShift(isTimerActiveNow)
+                    .background(Color.Black)
+                    .padding(if (isTablet) 16.dp else 4.dp)
             ) {
-                if (showHistoryScreen) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.clickable { viewModel.setShowHistoryScreen(false) }
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.ArrowBack,
-                            contentDescription = "Back to Timer",
-                            tint = WaterBlue,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "Back to Timer",
-                            color = WaterBlue,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-
-                    IconButton(
-                        onClick = { showCalendarDialog = true },
+                val sduiPrefs = com.example.api.RemoteConfigManager.sduiPreferences.collectAsState().value
+                if (sduiPrefs.motivationalBannerText.isNotEmpty()) {
+                    Box(
                         modifier = Modifier
-                            .clip(CircleShape)
-                            .background(Color(0xFF151515))
-                            .size(32.dp)
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
+                            .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.DateRange,
-                            contentDescription = "Select focus date",
-                            tint = WaterBlue,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                } else {
-                    Row(
-                        modifier = Modifier
-                            .weight(1f)
-                            .padding(end = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        FriendsFocusPill(
-                            viewModel = viewModel,
-                            onClick = { viewModel.navigateTo(Screen.LIVE_SPHERE) }
-                        )
-                    }
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        val isBellSilent by viewModel.isBellSilentModeEnabled.collectAsStateWithLifecycle()
-                        IconButton(
-                            onClick = { viewModel.setBellSilentModeEnabled(!isBellSilent) },
-                            modifier = Modifier
-                                .clip(CircleShape)
-                                .background(if (isBellSilent) Color(0xFFE53935) else Color(0xFF151515))
-                                .size(32.dp)
-                                .testTag("bell_silent_button")
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center,
+                            modifier = Modifier.fillMaxWidth()
                         ) {
                             Icon(
-                                imageVector = if (isBellSilent) Icons.Default.NotificationsOff else Icons.Default.Notifications,
-                                contentDescription = "Bell Silent Mode Toggle",
-                                tint = Color.White,
+                                imageVector = Icons.Default.Info,
+                                contentDescription = "Motivational Banner Icon",
+                                tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.size(16.dp)
                             )
-                        }
-                        IconButton(
-                            onClick = { viewModel.setTimerImmersive(true) },
-                            modifier = Modifier
-                                .clip(CircleShape)
-                                .background(Color(0xFF151515))
-                                .size(32.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Fullscreen,
-                                contentDescription = "Enter Fullscreen",
-                                tint = Color.White,
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-                        IconButton(
-                            onClick = { viewModel.setShowHistoryScreen(true) },
-                            modifier = Modifier
-                                .clip(CircleShape)
-                                .background(Color(0xFF151515))
-                                .size(32.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.History,
-                                contentDescription = "Focus History Overview",
-                                tint = Color.White,
-                                modifier = Modifier.size(16.dp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = sduiPrefs.motivationalBannerText,
+                                color = MaterialTheme.colorScheme.onBackground,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = TextAlign.Center
                             )
                         }
                     }
                 }
-            }
 
-            // Draw system alert window drawing permission banner
-            if (!hasOverlayPermission && !isOverlayPermissionDismissed && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                Card(
+                // Header Top Bar Row
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(bottom = 12.dp)
-                        .testTag("overlay_permission_banner"),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1C1C1E)),
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(1.dp, Color(0xFF333333))
+                        .padding(bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Row(
-                        modifier = Modifier.padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Info,
-                            contentDescription = "Permission Info",
-                            tint = WaterBlue,
-                            modifier = Modifier.size(24.dp)
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column(modifier = Modifier.weight(1f)) {
+                    if (showHistoryScreen) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.clickable { viewModel.setShowHistoryScreen(false) }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ArrowBack,
+                                contentDescription = "Back to Timer",
+                                tint = WaterBlue,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "Overlay Widget Enabled",
-                                color = Color.White,
-                                fontSize = 13.sp,
+                                text = "Back to Timer",
+                                color = WaterBlue,
+                                fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold
                             )
-                            Text(
-                                text = "Allow drawing over other apps to see a floating timer on the screen when minimized.",
-                                color = Color.LightGray,
-                                fontSize = 11.sp
-                            )
                         }
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Button(
-                            onClick = {
-                                try {
-                                    val intent = Intent(
-                                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                        android.net.Uri.parse("package:${context.packageName}")
-                                    )
-                                    context.startActivity(intent)
-                                } catch (e: Exception) {
-                                    val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
-                                    context.startActivity(intent)
-                                }
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = WaterBlue, contentColor = Color.Black),
-                            shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                            modifier = Modifier.height(32.dp)
-                        ) {
-                            Text("Enable", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        }
-                        Spacer(modifier = Modifier.width(4.dp))
+
                         IconButton(
-                            onClick = { isOverlayPermissionDismissed = true },
-                            modifier = Modifier.size(28.dp).testTag("dismiss_overlay_permission")
+                            onClick = { showCalendarDialog = true },
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(Color(0xFF151515))
+                                .size(32.dp)
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Close,
-                                contentDescription = "No I won't",
-                                tint = Color.LightGray,
+                                imageVector = Icons.Default.DateRange,
+                                contentDescription = "Select focus date",
+                                tint = WaterBlue,
                                 modifier = Modifier.size(16.dp)
                             )
                         }
+                    } else {
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(end = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            FriendsFocusPill(
+                                viewModel = viewModel,
+                                onClick = { viewModel.navigateTo(Screen.LIVE_SPHERE) }
+                            )
+                        }
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            val isBellSilent by viewModel.isBellSilentModeEnabled.collectAsStateWithLifecycle()
+                            IconButton(
+                                onClick = { viewModel.setBellSilentModeEnabled(!isBellSilent) },
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .background(if (isBellSilent) Color(0xFFE53935) else Color(0xFF151515))
+                                    .size(32.dp)
+                                    .testTag("bell_silent_button")
+                            ) {
+                                Icon(
+                                    imageVector = if (isBellSilent) Icons.Default.NotificationsOff else Icons.Default.Notifications,
+                                    contentDescription = "Bell Silent Mode Toggle",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                            IconButton(
+                                onClick = { viewModel.setTimerImmersive(true) },
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF151515))
+                                    .size(32.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Fullscreen,
+                                    contentDescription = "Enter Fullscreen",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                            IconButton(
+                                onClick = { viewModel.setShowHistoryScreen(true) },
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF151515))
+                                    .size(32.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.History,
+                                    contentDescription = "Focus History Overview",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
                     }
                 }
-            }
 
-            Spacer(modifier = Modifier.height(16.dp))
+                // Draw system alert window drawing permission banner
+                if (!hasOverlayPermission && !isOverlayPermissionDismissed && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp)
+                            .testTag("overlay_permission_banner"),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1C1C1E)),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, Color(0xFF333333))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Info,
+                                contentDescription = "Permission Info",
+                                tint = WaterBlue,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Overlay Widget Enabled",
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Allow drawing over other apps to see a floating timer on the screen when minimized.",
+                                    color = Color.LightGray,
+                                    fontSize = 11.sp
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Button(
+                                onClick = {
+                                    try {
+                                        val intent = Intent(
+                                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                            android.net.Uri.parse("package:${context.packageName}")
+                                        )
+                                        context.startActivity(intent)
+                                    } catch (e: Exception) {
+                                        val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
+                                        context.startActivity(intent)
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = WaterBlue, contentColor = Color.Black),
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier.height(32.dp)
+                            ) {
+                                Text("Enable", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                            Spacer(modifier = Modifier.width(4.dp))
+                            IconButton(
+                                onClick = { isOverlayPermissionDismissed = true },
+                                modifier = Modifier.size(28.dp).testTag("dismiss_overlay_permission")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "No I won't",
+                                    tint = Color.LightGray,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+                    }
+                }
 
-            AnimatedContent(
-                targetState = showHistoryScreen,
-                transitionSpec = {
-                    slideInHorizontally { width -> if (targetState) width else -width } + fadeIn() togetherWith
-                    slideOutHorizontally { width -> if (targetState) -width else width } + fadeOut()
-                },
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                label = "history_transition"
-            ) { targetHistory ->
-                if (targetHistory) {
-                    TimerHistoryView(
-                        viewModel = viewModel,
-                        selectedDateStr = selectedDateStr,
-                        globalTodaySeconds = globalTodaySeconds
-                    )
-                } else {
-                    TimerLiveControlContent(
-                        viewModel = viewModel,
-                        isTablet = isTablet,
-                        isImmersive = false,
-                        isAntiBurnCenteredByTap = true,
-                        globalTodaySeconds = globalTodaySeconds,
-                        focusTimerDurationMins = focusTimerDurationMins,
-                        myXp = myXp,
-                        wastedMins = wastedMins
-                    )
+                Spacer(modifier = Modifier.height(16.dp))
+
+                AnimatedContent(
+                    targetState = showHistoryScreen,
+                    transitionSpec = {
+                        slideInHorizontally { width -> if (targetState) width else -width } + fadeIn() togetherWith
+                        slideOutHorizontally { width -> if (targetState) -width else width } + fadeOut()
+                    },
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    label = "history_transition"
+                ) { targetHistory ->
+                    if (targetHistory) {
+                        TimerHistoryView(
+                            viewModel = viewModel,
+                            selectedDateStr = selectedDateStr,
+                            globalTodaySeconds = globalTodaySeconds
+                        )
+                    } else {
+                        TimerLiveControlContent(
+                            viewModel = viewModel,
+                            isTablet = isTablet,
+                            isImmersive = false,
+                            isAntiBurnCenteredByTap = true,
+                            globalTodaySeconds = globalTodaySeconds,
+                            focusTimerDurationMins = focusTimerDurationMins,
+                            myXp = myXp,
+                            wastedMins = wastedMins
+                        )
+                    }
                 }
             }
         }
