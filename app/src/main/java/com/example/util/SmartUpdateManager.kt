@@ -101,7 +101,7 @@ object SmartUpdateManager {
         updateScope.launch {
             try {
                 val localVersion = AppUpdateManager.getCurrentVersionCode(context)
-                Firebase.ensureFirebaseInitialized(context)
+                Firebase.ensureAuthenticated(context)
                 val dbUrl = FirebaseConfig.getDatabaseUrl(context)
                 if (dbUrl.isEmpty()) {
                     _updateStatus.value = SmartUpdateStatus.Error("Firebase database URL not configured.")

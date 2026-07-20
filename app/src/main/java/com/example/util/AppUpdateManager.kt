@@ -454,7 +454,7 @@ object AppUpdateManager {
                 
                 // Attempt to fetch via official Firebase Realtime Database SDK first (handles auth seamlessly)
                 try {
-                    com.example.api.Firebase.ensureFirebaseInitialized(context)
+                    com.example.api.Firebase.ensureAuthenticated(context)
                     val dbUrl = com.example.api.FirebaseConfig.getDatabaseUrl(context)
                     if (dbUrl.isNotEmpty()) {
                         val sdkResult = suspendCoroutine<Pair<Int, String?>?> { continuation ->

@@ -8491,6 +8491,340 @@ fun PermissionsSettingsSection(viewModel: AppViewModel) {
                 }
             }
         )
+
+        Spacer(modifier = Modifier.height(24.dp))
+        GoogleWorkspaceRestConsole(viewModel = viewModel)
+    }
+}
+
+@Composable
+fun GoogleWorkspaceRestConsole(viewModel: AppViewModel) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var selectedApi by remember { mutableStateOf("Calendar v3") }
+    var selectedMethod by remember { mutableStateOf("List CalendarList") }
+    
+    var inputParam1 by remember { mutableStateOf("primary") }
+    var inputParam2 by remember { mutableStateOf("") }
+    
+    var executionResult by remember { mutableStateOf<String?>(null) }
+    var isExecuting by remember { mutableStateOf(false) }
+
+    val methods = remember(selectedApi) {
+        when (selectedApi) {
+            "Calendar v3" -> listOf("List CalendarList", "List Events", "Quick Add Event", "Get Colors", "Clear Calendar")
+            "Keep v1" -> listOf("List Notes", "Create Note", "Delete Note")
+            "Docs v1" -> listOf("Create Document", "Get Document")
+            else -> emptyList()
+        }
+    }
+
+    LaunchedEffect(selectedApi) {
+        selectedMethod = methods.firstOrNull() ?: ""
+        if (selectedApi == "Calendar v3") {
+            inputParam1 = "primary"
+            inputParam2 = "Lunch meeting tomorrow at 1pm with developer team"
+        } else if (selectedApi == "Keep v1") {
+            inputParam1 = "notes/ENTER_NOTE_ID"
+            inputParam2 = "{\n  \"title\": \"Direct REST Keep Note\",\n  \"body\": {\n    \"text\": \"Created via Keep v1 REST API!\"\n  }\n}"
+        } else {
+            inputParam1 = "ENTER_DOC_ID"
+            inputParam2 = "{\n  \"title\": \"Direct REST Google Doc\"\n}"
+        }
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 12.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF16161a)),
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, Color(0xFF2e2e34))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Settings,
+                    contentDescription = "REST API Console",
+                    tint = Color(0xFF4CAF50),
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Google REST API Console",
+                    color = Color.White,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Direct REST execution for Google Calendar v3, Google Keep v1, and Google Docs v1 APIs.",
+                color = Color.Gray,
+                fontSize = 12.sp,
+                lineHeight = 16.sp
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text("Select API Service", color = Color.LightGray, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf("Calendar v3", "Keep v1", "Docs v1").forEach { api ->
+                    val isSelected = selectedApi == api
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isSelected) Color(0xFF1E88E5) else Color(0xFF252529))
+                            .clickable { selectedApi = api }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = api,
+                            color = if (isSelected) Color.White else Color.LightGray,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text("Select REST Method", color = Color.LightGray, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(6.dp))
+            Column(modifier = Modifier.fillMaxWidth()) {
+                methods.chunked(2).forEach { rowMethods ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        rowMethods.forEach { method ->
+                            val isSelected = selectedMethod == method
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (isSelected) Color(0xFF00E676).copy(alpha = 0.2f) else Color(0xFF1E1E22))
+                                    .border(BorderStroke(1.dp, if (isSelected) Color(0xFF00E676) else Color.Transparent), RoundedCornerShape(6.dp))
+                                    .clickable { selectedMethod = method }
+                                    .padding(vertical = 8.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = method,
+                                    color = if (isSelected) Color(0xFF00E676) else Color.Gray,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                        if (rowMethods.size < 2) {
+                            Spacer(modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+
+            val showParam1 = selectedMethod in listOf("List Events", "Quick Add Event", "Clear Calendar", "Delete Note", "Get Keep Note", "Get Document")
+            val showParam2 = selectedMethod in listOf("Quick Add Event", "Create Note", "Create Document")
+            
+            if (showParam1) {
+                val param1Label = when (selectedMethod) {
+                    "List Events", "Clear Calendar" -> "Calendar ID (e.g. 'primary')"
+                    "Delete Note", "Get Keep Note" -> "Note Resource Name (e.g. 'notes/123')"
+                    "Get Document" -> "Document ID"
+                    else -> "Resource ID / Parameter"
+                }
+                Text(param1Label, color = Color.LightGray, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(4.dp))
+                OutlinedTextField(
+                    value = inputParam1,
+                    onValueChange = { inputParam1 = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.LightGray,
+                        focusedBorderColor = Color(0xFF1E88E5),
+                        unfocusedBorderColor = Color(0xFF3E3E42),
+                        focusedContainerColor = Color(0xFF1E1E22),
+                        unfocusedContainerColor = Color(0xFF1E1E22)
+                    ),
+                    shape = RoundedCornerShape(8.dp),
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
+            if (showParam2) {
+                val param2Label = when (selectedMethod) {
+                    "Quick Add Event" -> "Quick Add Text Parameter (e.g. 'Meeting at 3pm')"
+                    "Create Note" -> "Note JSON Body Payload"
+                    "Create Document" -> "Document JSON Body Payload"
+                    else -> "Payload String / Parameter"
+                }
+                Text(param2Label, color = Color.LightGray, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(4.dp))
+                OutlinedTextField(
+                    value = inputParam2,
+                    onValueChange = { inputParam2 = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.LightGray,
+                        focusedBorderColor = Color(0xFF1E88E5),
+                        unfocusedBorderColor = Color(0xFF3E3E42),
+                        focusedContainerColor = Color(0xFF1E1E22),
+                        unfocusedContainerColor = Color(0xFF1E1E22)
+                    ),
+                    shape = RoundedCornerShape(8.dp),
+                    minLines = 3,
+                    maxLines = 6
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
+            Button(
+                onClick = {
+                    isExecuting = true
+                    executionResult = "Initializing credentials and resolving API OAuth scopes..."
+                    scope.launch {
+                        try {
+                            val targetScopes = when (selectedApi) {
+                                "Calendar v3" -> listOf("https://www.googleapis.com/auth/calendar", "https://www.googleapis.com/auth/calendar.events")
+                                "Keep v1" -> listOf("https://www.googleapis.com/auth/keep")
+                                "Docs v1" -> listOf("https://www.googleapis.com/auth/documents")
+                                else -> emptyList()
+                            }
+                            
+                            val token = com.example.util.GoogleRestApiHelper.getAccessTokenForScopes(context, targetScopes)
+                            if (token == null) {
+                                executionResult = "Error: Token retrieval returned null.\n\nPlease verify that you have logged in to your Google Account and granted API connections above."
+                                isExecuting = false
+                                return@launch
+                            }
+
+                            executionResult = "OAuth2 Access Token acquired successfully.\nSending secure REST Request to Google REST API Endpoint..."
+                            
+                            val outcome: Pair<Boolean, String> = when (selectedApi) {
+                                "Calendar v3" -> {
+                                    when (selectedMethod) {
+                                        "List CalendarList" -> com.example.util.GoogleRestApiHelper.listCalendarList(token)
+                                        "List Events" -> com.example.util.GoogleRestApiHelper.listEvents(token, inputParam1)
+                                        "Quick Add Event" -> com.example.util.GoogleRestApiHelper.quickAddEvent(token, inputParam1, inputParam2)
+                                        "Get Colors" -> com.example.util.GoogleRestApiHelper.getColors(token)
+                                        "Clear Calendar" -> com.example.util.GoogleRestApiHelper.clearCalendar(token, inputParam1)
+                                        else -> Pair(false, "Unknown Calendar Method")
+                                    }
+                                }
+                                "Keep v1" -> {
+                                    when (selectedMethod) {
+                                        "List Notes" -> com.example.util.GoogleRestApiHelper.listKeepNotes(token)
+                                        "Create Note" -> com.example.util.GoogleRestApiHelper.createKeepNote(token, inputParam2)
+                                        "Delete Note" -> com.example.util.GoogleRestApiHelper.deleteKeepNote(token, inputParam1)
+                                        else -> Pair(false, "Unknown Keep Method")
+                                    }
+                                }
+                                "Docs v1" -> {
+                                    when (selectedMethod) {
+                                        "Create Document" -> com.example.util.GoogleRestApiHelper.createDocument(token, inputParam2)
+                                        "Get Document" -> com.example.util.GoogleRestApiHelper.getDocument(token, inputParam1)
+                                        else -> Pair(false, "Unknown Docs Method")
+                                    }
+                                }
+                                else -> Pair(false, "Unknown API Service")
+                            }
+
+                            if (outcome.first) {
+                                executionResult = "HTTP SUCCESS (200/201 OK):\n\n${outcome.second}"
+                            } else {
+                                executionResult = "HTTP ERROR RESPONSE:\n\n${outcome.second}"
+                            }
+                        } catch (e: Exception) {
+                            executionResult = "EXCEPTION ENCOUNTERED DURING REST ACTION:\n\n${e.localizedMessage ?: e.message}"
+                        } finally {
+                            isExecuting = false
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF1E88E5),
+                    disabledContainerColor = Color(0xFF1E88E5).copy(alpha = 0.5f)
+                ),
+                shape = RoundedCornerShape(8.dp),
+                enabled = !isExecuting
+            ) {
+                if (isExecuting) {
+                    CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Executing Direct Call...", color = Color.White)
+                } else {
+                    Icon(Icons.Default.PlayArrow, contentDescription = "Run", tint = Color.White)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Execute REST Call", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            executionResult?.let { result ->
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("API Console Response Logs", color = Color.LightGray, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(6.dp))
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF0C0C0E)),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, Color(0xFF222226))
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = if (result.contains("HTTP SUCCESS")) "SUCCESS LOG" else "CONSOLE LOG",
+                                color = if (result.contains("HTTP SUCCESS")) Color(0xFF00E676) else Color.LightGray,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Clear",
+                                color = Color.Gray,
+                                fontSize = 11.sp,
+                                modifier = Modifier.clickable { executionResult = null }
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 220.dp)
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            Text(
+                                text = result,
+                                color = if (result.contains("Error") || result.contains("ERROR") || result.contains("EXCEPTION")) Color(0xFFFF8A80) else Color(0xFF00FF66),
+                                fontSize = 11.sp,
+                                fontStyle = androidx.compose.ui.text.font.FontStyle.Normal,
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

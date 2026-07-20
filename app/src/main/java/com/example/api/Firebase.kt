@@ -139,6 +139,7 @@ object Firebase {
             com.google.firebase.FirebaseApp.getInstance()
             enablePersistenceSafely(context)
             cleanupOldDatabaseBranches(context)
+            signInAnonymouslyIfPossible(context)
         } catch (e: IllegalStateException) {
             try {
                 val url = com.example.api.FirebaseConfig.getDatabaseUrl(context)
@@ -152,9 +153,43 @@ object Firebase {
                 android.util.Log.i("FirebaseClient", "Successfully initialized custom FirebaseApp programmatically")
                 enablePersistenceSafely(context)
                 cleanupOldDatabaseBranches(context)
+                signInAnonymouslyIfPossible(context)
             } catch (initEx: Exception) {
                 android.util.Log.e("FirebaseClient", "Failed to initialize FirebaseApp programmatically", initEx)
             }
+        }
+    }
+
+    private fun signInAnonymouslyIfPossible(context: Context) {
+        try {
+            val auth = com.google.firebase.auth.FirebaseAuth.getInstance()
+            if (auth.currentUser == null) {
+                auth.signInAnonymously()
+                    .addOnSuccessListener {
+                        android.util.Log.i("FirebaseClient", "Successfully signed in anonymously for RTDB authenticated access")
+                    }
+                    .addOnFailureListener { e ->
+                        android.util.Log.e("FirebaseClient", "Anonymous sign-in failed", e)
+                    }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("FirebaseClient", "FirebaseAuth sign in anonymously error", e)
+        }
+    }
+
+    suspend fun ensureAuthenticated(context: Context) = withContext(Dispatchers.IO) {
+        ensureFirebaseInitialized(context)
+        try {
+            val auth = com.google.firebase.auth.FirebaseAuth.getInstance()
+            if (auth.currentUser == null) {
+                android.util.Log.i("FirebaseClient", "Awaiting anonymous sign-in for authenticated RTDB access...")
+                auth.signInAnonymously().await()
+                android.util.Log.i("FirebaseClient", "Anonymous sign-in complete")
+            } else {
+                android.util.Log.d("FirebaseClient", "Already authenticated with UID: ${auth.currentUser?.uid}")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("FirebaseClient", "Anonymous sign-in await failed", e)
         }
     }
 
