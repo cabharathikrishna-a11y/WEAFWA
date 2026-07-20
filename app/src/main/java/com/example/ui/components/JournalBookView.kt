@@ -430,7 +430,13 @@ fun JournalBookView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                             Button(
                                 onClick = {
                                     viewModel.fetchGooglePhotos(context) { intent ->
-                                        photosAuthLauncher.launch(intent)
+                                        try {
+                                            photosAuthLauncher.launch(intent)
+                                        } catch (e: android.content.ActivityNotFoundException) {
+                                            Toast.makeText(context, "No web browser or application found to handle Google login.", Toast.LENGTH_LONG).show()
+                                        } catch (e: Exception) {
+                                            Toast.makeText(context, "Failed to launch login: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                                        }
                                     }
                                 },
                                 colors = ButtonDefaults.buttonColors(containerColor = WaterBlue)
@@ -929,7 +935,13 @@ fun JournalBookView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                             } else {
                                 showGooglePhotosDialog = true
                                 viewModel.fetchGooglePhotos(context) { intent ->
-                                    photosAuthLauncher.launch(intent)
+                                    try {
+                                        photosAuthLauncher.launch(intent)
+                                    } catch (e: android.content.ActivityNotFoundException) {
+                                        Toast.makeText(context, "No web browser or application found to handle Google login.", Toast.LENGTH_LONG).show()
+                                    } catch (e: Exception) {
+                                        Toast.makeText(context, "Failed to launch login: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                                    }
                                 }
                             }
                         }) {
@@ -1887,7 +1899,13 @@ fun JournalBookView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                                         Button(
                                             onClick = {
                                                 viewModel.fetchGooglePhotos(context) { intent ->
-                                                    photosAuthLauncher.launch(intent)
+                                                    try {
+                                                        photosAuthLauncher.launch(intent)
+                                                    } catch (e: android.content.ActivityNotFoundException) {
+                                                        Toast.makeText(context, "No web browser or application found to handle Google login.", Toast.LENGTH_LONG).show()
+                                                    } catch (e: Exception) {
+                                                        Toast.makeText(context, "Failed to launch login: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                                                    }
                                                 }
                                             },
                                             colors = ButtonDefaults.buttonColors(containerColor = WaterBlue.copy(alpha = 0.2f), contentColor = WaterBlue),
@@ -1931,7 +1949,13 @@ fun JournalBookView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                                                 Button(
                                                     onClick = {
                                                         viewModel.fetchGooglePhotos(context) { intent ->
-                                                            photosAuthLauncher.launch(intent)
+                                                            try {
+                                                                photosAuthLauncher.launch(intent)
+                                                            } catch (e: android.content.ActivityNotFoundException) {
+                                                                Toast.makeText(context, "No web browser or application found to handle Google login.", Toast.LENGTH_LONG).show()
+                                                            } catch (e: Exception) {
+                                                                Toast.makeText(context, "Failed to launch login: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                                                            }
                                                         }
                                                     },
                                                     colors = ButtonDefaults.buttonColors(containerColor = WaterBlue)

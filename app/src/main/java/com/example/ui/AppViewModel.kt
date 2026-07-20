@@ -116,7 +116,15 @@ class AppViewModel(
     private val _userEmail = MutableStateFlow(prefs.getString("user_email", "") ?: "")
     val userEmail: StateFlow<String> = _userEmail.asStateFlow()
 
-    val allUsers: StateFlow<Map<String, com.example.api.PeerLiveState>> get() = com.example.api.PeerLiveSphereManager.peerLiveStates
+    val allUsers: StateFlow<Map<String, com.example.api.PeerLiveState>>
+        get() {
+            return try {
+                val flow = com.example.api.PeerLiveSphereManager.peerLiveStates
+                flow ?: MutableStateFlow<Map<String, com.example.api.PeerLiveState>>(emptyMap()).asStateFlow()
+            } catch (e: Exception) {
+                MutableStateFlow<Map<String, com.example.api.PeerLiveState>>(emptyMap()).asStateFlow()
+            }
+        }
 
     private val _peerSyllabusCompletions = MutableStateFlow<Map<String, Set<String>>>(emptyMap())
     val peerSyllabusCompletions: StateFlow<Map<String, Set<String>>> = _peerSyllabusCompletions.asStateFlow()
@@ -228,66 +236,82 @@ class AppViewModel(
 
     fun startListeningToPeersSyllabus() {
         viewModelScope.launch {
-            allUsers.collect { usersMap ->
-                val context = getApplication<android.app.Application>()
-                val dbUrl = FirebaseConfig.getDatabaseUrl(context)
-                if (dbUrl.isEmpty()) return@collect
-                val database = com.google.firebase.database.FirebaseDatabase.getInstance(dbUrl)
+            try {
+                val flow = allUsers
+                if (flow != null) {
+                    flow.collect { usersMap ->
+                        if (usersMap == null) return@collect
+                        val context = getApplication<android.app.Application>()
+                        val dbUrl = FirebaseConfig.getDatabaseUrl(context)
+                        if (dbUrl.isEmpty()) return@collect
+                        val database = com.google.firebase.database.FirebaseDatabase.getInstance(dbUrl)
+                        if (database == null) return@collect
 
-                // Add listeners for any new user in usersMap
-                usersMap.keys.forEach { rawEmail ->
-                    val email = rawEmail.lowercase().trim()
-                    if (email.isNotEmpty() && !syllabusListeners.containsKey(email)) {
-                        val sanitizedEmail = DevicePresenceManager.sanitizeEmail(email)
-                        val ref = database.getReference("FOCUS_TIMMER")
-                            .child("USER")
-                            .child(sanitizedEmail)
-                            .child("SYLLABUS_COMPLETED")
+                        // Add listeners for any new user in usersMap
+                        usersMap.keys.forEach { rawEmail ->
+                            if (rawEmail != null) {
+                                val email = rawEmail.lowercase().trim()
+                                if (email.isNotEmpty() && !syllabusListeners.containsKey(email)) {
+                                    val sanitizedEmail = DevicePresenceManager.sanitizeEmail(email)
+                                    val ref = database.getReference("FOCUS_TIMMER")
+                                        .child("USER")
+                                        .child(sanitizedEmail)
+                                        .child("SYLLABUS_COMPLETED")
 
-                        val listener = object : com.google.firebase.database.ValueEventListener {
-                            override fun onDataChange(snapshot: com.google.firebase.database.DataSnapshot) {
-                                val completedTopicIds = mutableSetOf<String>()
-                                if (snapshot.exists()) {
-                                    for (child in snapshot.children) {
-                                        val topicId = child.key ?: continue
-                                        val isCompleted = child.getValue(Boolean::class.java) ?: false
-                                        if (isCompleted) {
-                                            completedTopicIds.add(topicId)
+                                    val listener = object : com.google.firebase.database.ValueEventListener {
+                                        override fun onDataChange(snapshot: com.google.firebase.database.DataSnapshot) {
+                                            val completedTopicIds = mutableSetOf<String>()
+                                            if (snapshot != null && snapshot.exists()) {
+                                                val children = snapshot.children
+                                                if (children != null) {
+                                                    for (child in children) {
+                                                        if (child != null) {
+                                                            val topicId = child.key ?: continue
+                                                            val isCompleted = child.getValue(Boolean::class.java) ?: false
+                                                            if (isCompleted) {
+                                                                completedTopicIds.add(topicId)
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            val currentMap = _peerSyllabusCompletions.value.toMutableMap()
+                                            currentMap[email] = completedTopicIds
+                                            _peerSyllabusCompletions.value = currentMap
+                                        }
+
+                                        override fun onCancelled(error: com.google.firebase.database.DatabaseError) {
+                                            Log.e("AppViewModel", "Syllabus listener cancelled for $email", error.toException())
                                         }
                                     }
+                                    syllabusListeners[email] = listener
+                                    ref.addValueEventListener(listener)
+                                }
+                            }
+                        }
+
+                        // Remove listeners for users no longer in usersMap
+                        val keysToKeep = usersMap.keys.filterNotNull().map { it.lowercase().trim() }.toSet()
+                        syllabusListeners.keys.forEach { email ->
+                            if (email != null && !keysToKeep.contains(email)) {
+                                val sanitizedEmail = DevicePresenceManager.sanitizeEmail(email)
+                                val ref = database.getReference("FOCUS_TIMMER")
+                                    .child("USER")
+                                    .child(sanitizedEmail)
+                                    .child("SYLLABUS_COMPLETED")
+                                val listener = syllabusListeners.remove(email)
+                                if (listener != null) {
+                                    ref.removeEventListener(listener)
                                 }
                                 val currentMap = _peerSyllabusCompletions.value.toMutableMap()
-                                currentMap[email] = completedTopicIds
+                                currentMap.remove(email)
                                 _peerSyllabusCompletions.value = currentMap
                             }
-
-                            override fun onCancelled(error: com.google.firebase.database.DatabaseError) {
-                                Log.e("AppViewModel", "Syllabus listener cancelled for $email", error.toException())
-                            }
                         }
-                        syllabusListeners[email] = listener
-                        ref.addValueEventListener(listener)
                     }
                 }
-
-                // Remove listeners for users no longer in usersMap
-                val keysToKeep = usersMap.keys.map { it.lowercase().trim() }.toSet()
-                syllabusListeners.keys.forEach { email ->
-                    if (!keysToKeep.contains(email)) {
-                        val sanitizedEmail = DevicePresenceManager.sanitizeEmail(email)
-                        val ref = database.getReference("FOCUS_TIMMER")
-                            .child("USER")
-                            .child(sanitizedEmail)
-                            .child("SYLLABUS_COMPLETED")
-                        val listener = syllabusListeners.remove(email)
-                        if (listener != null) {
-                            ref.removeEventListener(listener)
-                        }
-                        val currentMap = _peerSyllabusCompletions.value.toMutableMap()
-                        currentMap.remove(email)
-                        _peerSyllabusCompletions.value = currentMap
-                    }
-                }
+            } catch (e: Exception) {
+                Log.e("AppViewModel", "Error in startListeningToPeersSyllabus", e)
             }
         }
     }

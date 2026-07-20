@@ -523,7 +523,13 @@ fun KeepNotesView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                                 val outPhotoFile = File(StorageHelper.getAppFilesDir(context), "note_photo_${System.currentTimeMillis()}.jpg")
                                 activePhotoFile = outPhotoFile
                                 val photoUri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", outPhotoFile)
-                                takePhotoLauncher.launch(photoUri)
+                                try {
+                                    takePhotoLauncher.launch(photoUri)
+                                } catch (e: android.content.ActivityNotFoundException) {
+                                    Toast.makeText(context, "No camera application found to take photos.", Toast.LENGTH_LONG).show()
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "Failed to open camera: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                                }
                             }
                         }) {
                             Icon(Icons.Default.PhotoCamera, contentDescription = "Camera Snapper", tint = Color.White)
@@ -537,7 +543,13 @@ fun KeepNotesView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                                 val outVideoFile = File(StorageHelper.getAppFilesDir(context), "note_video_${System.currentTimeMillis()}.mp4")
                                 activeVideoFile = outVideoFile
                                 val videoUri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", outVideoFile)
-                                captureVideoLauncher.launch(videoUri)
+                                try {
+                                    captureVideoLauncher.launch(videoUri)
+                                } catch (e: android.content.ActivityNotFoundException) {
+                                    Toast.makeText(context, "No video recorder application found to record videos.", Toast.LENGTH_LONG).show()
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "Failed to open video recorder: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                                }
                             }
                         }) {
                             Icon(Icons.Default.Videocam, contentDescription = "Video Recorder", tint = Color.White)
